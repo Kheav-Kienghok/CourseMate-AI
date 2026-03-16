@@ -11,7 +11,6 @@ from telegram.ext import (
 )
 
 from bot.handlers import (
-    assignments_command,
     courses_command,
     error_handler,
     grades_command,
@@ -43,9 +42,7 @@ class CourseMateBot:
             CommandHandler("settoken", set_canvas_token_command)
         )
         self._application.add_handler(CommandHandler("courses", courses_command))
-        self._application.add_handler(
-            CommandHandler("assignments", assignments_command)
-        )
+
         self._application.add_handler(CommandHandler("grades", grades_command))
         self._application.add_handler(CommandHandler("reminders", reminders_command))
         self._application.add_handler(CallbackQueryHandler(main_menu_callback))

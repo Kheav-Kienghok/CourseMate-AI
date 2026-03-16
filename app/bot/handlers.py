@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -9,9 +10,9 @@ from canvas.canvas_client import (
     get_course_assignments,
     get_dashboard_cards,
     get_student_assignment,
+    get_assignment_submission,
 )
 from bot.keyboards import (
-    assignments_keyboard,
     course_assignments_keyboard,
     course_menu_keyboard,
     courses_keyboard,
@@ -20,6 +21,33 @@ from bot.keyboards import (
 from services.user_store import get_user_canvas_token, set_user_canvas_token
 
 logger = logging.getLogger(__name__)
+
+
+def _format_canvas_datetime(value: str | None) -> str | None:
+    """Format a Canvas ISO8601 datetime into a readable string.
+
+    Example input: "2026-02-23T16:59:59Z"
+    Output: "February 23, 2026 04:59 PM" (UTC)
+    """
+
+    if not value:
+        return None
+
+    try:
+        if value.endswith("Z"):
+            dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc,
+            )
+        else:
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+        # Format in 12-hour clock with AM/PM, e.g. "March 20, 2026 01:30 PM"
+        return dt.strftime("%B %-d, %Y %I:%M %p")
+    except Exception:  # noqa: BLE001
+        # Fallback to raw value if parsing fails
+        return value
 
 # Number of assignments to show per page when listing course assignments.
 ASSIGNMENTS_PAGE_SIZE = 5
@@ -211,31 +239,6 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await render_courses(message, canvas_token=canvas_token)
 
 
-async def assignments_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle /assignments command."""
-
-    message = update.effective_message
-    if not message:
-        return
-
-    # For now, use a static sample assignment wired to the GraphQL endpoint.
-    sample_assignments = [
-        {
-            "title": "Sample Assignment",
-            "assignment_lid": "69732",
-            "submission_id": "U3VibWlzc2lvbi0xODk4MDQ3",
-        }
-    ]
-
-    await message.reply_text(
-        "📝 *Your assignments* (demo):",
-        reply_markup=assignments_keyboard(sample_assignments),
-        parse_mode="Markdown",
-    )
-
-
 async def render_course_assignments(
     message,
     course_id: int,
@@ -243,6 +246,7 @@ async def render_course_assignments(
     *,
     page: int = 1,
     edit: bool = False,
+    status: str | None = None,
 ) -> None:
     """Render assignments for a specific course.
 
@@ -268,8 +272,31 @@ async def render_course_assignments(
             )
         return
 
+    # Optionally filter assignments into past or upcoming based on due date
+    if status in {"past", "upcoming"}:
+        today_str = datetime.now(timezone.utc).date().isoformat()
+
+        filtered: list[dict] = []
+        for a in assignments:
+            due_at = a.get("due_at")
+            if not due_at:
+                # Treat assignments without a due date as upcoming
+                if status == "upcoming":
+                    filtered.append(a)
+                continue
+
+            due_date_str = str(due_at).split("T", maxsplit=1)[0]
+
+            if status == "past" and due_date_str < today_str:
+                filtered.append(a)
+            elif status == "upcoming" and due_date_str >= today_str:
+                filtered.append(a)
+
+        assignments = filtered
+
     if not assignments:
-        text = f"📝 No assignments found for course `{course_id}`."
+        label = "past" if status == "past" else "upcoming" if status == "upcoming" else "any"
+        text = f"📝 No {label} assignments found for course `{course_id}`."
         if edit:
             await message.edit_text(text, reply_markup=main_menu_keyboard())
         else:
@@ -290,13 +317,22 @@ async def render_course_assignments(
     end_index = start_index + page_size
     page_assignments = assignments[start_index:end_index]
 
-    text = f"📝 *Assignments for course* `{course_id}` " f"(Page {page}/{total_pages}):"
+    if status == "past":
+        label = "Past assignments"
+    elif status == "upcoming":
+        label = "Upcoming assignments"
+    else:
+        label = "Assignments"
+
+    text = (
+        f"📝 *{label} for course* `{course_id}` " f"(Page {page}/{total_pages}):"
+    )
 
     if edit:
         await message.edit_text(
             text,
             reply_markup=course_assignments_keyboard(
-                course_id, page_assignments, page, total_pages
+                course_id, page_assignments, page, total_pages, status
             ),
             parse_mode="Markdown",
         )
@@ -304,7 +340,7 @@ async def render_course_assignments(
         await message.reply_text(
             text,
             reply_markup=course_assignments_keyboard(
-                course_id, page_assignments, page, total_pages
+                course_id, page_assignments, page, total_pages, status
             ),
             parse_mode="Markdown",
         )
@@ -453,9 +489,6 @@ async def main_menu_callback(
 
         await render_courses(query.message, canvas_token=canvas_token, edit=True)
 
-    elif data == "assignments":
-        await assignments_command(update, context)
-
     elif data == "grades":
         await grades_command(update, context)
 
@@ -472,7 +505,8 @@ async def main_menu_callback(
 
         parts = data.split(":")
 
-        # course:{course_id}:assignments[:page]
+        # course:{course_id}:assignments[:status][:page]
+        #   - status can be "past" or "upcoming"
         if len(parts) >= 3 and parts[2] == "assignments":
             try:
                 course_id_int = int(parts[1])
@@ -485,11 +519,23 @@ async def main_menu_callback(
                 return
 
             page = 1
+            status: str | None = None
+
             if len(parts) >= 4:
-                try:
-                    page = int(parts[3])
-                except ValueError:
-                    page = 1
+                # pattern: course:{course_id}:assignments:{page}
+                # or:      course:{course_id}:assignments:{status}:{page}
+                if parts[3] in {"past", "upcoming"}:
+                    status = parts[3]
+                    if len(parts) >= 5:
+                        try:
+                            page = int(parts[4])
+                        except ValueError:
+                            page = 1
+                else:
+                    try:
+                        page = int(parts[3])
+                    except ValueError:
+                        page = 1
 
             chat = query.message.chat if query.message else None
             chat_id = getattr(chat, "id", None) if chat else None
@@ -518,6 +564,15 @@ async def main_menu_callback(
                 canvas_token,
                 page=page,
                 edit=True,
+                status=status,
+            )
+            return
+
+        # course:{course_id}:rollcall
+        if len(parts) == 3 and parts[2] == "rollcall":
+            await query.edit_message_text(
+                "📋 Roll Call attendance is not implemented yet.",
+                reply_markup=course_menu_keyboard(int(parts[1])),
             )
             return
 
@@ -648,27 +703,65 @@ async def main_menu_callback(
         allowed_attempts = selected.get("allowed_attempts")
         has_submitted = selected.get("has_submitted_submissions")
 
+        # Try to fetch the current user's submission to get the score/grade
+        submission_score = None
+        try:
+            submission = get_assignment_submission(
+                course_id,
+                assignment_id,
+                canvas_token=canvas_token,
+            )
+            submission_score = submission.get("score")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Could not load submission for course_id=%s assignment_id=%s: %s",
+                course_id,
+                assignment_id,
+                exc,
+            )
+
         lines: list[str] = [
             f"📝 *{name}*",
+            "------------------------------------------------",
             "",
-            f"🆔 Assignment ID: `{assignment_id}`",
         ]
-
-        if due_at:
-            lines.append(f"📅 Due: `{due_at}`")
-
-        if created_at:
-            lines.append(f"🕒 Created at: `{created_at}`")
 
         if points_possible is not None:
             lines.append(f"🏷 Points possible: *{points_possible}*")
 
+        if submission_score is not None:
+            if points_possible is not None:
+                lines.append(
+                    f"📊 Score: *{submission_score}* / *{points_possible}*",
+                )
+            else:
+                lines.append(f"📊 Score: *{submission_score}*")
+
         if allowed_attempts is not None:
-            lines.append(f"🔁 Allowed attempts: *{allowed_attempts}*")
+            if allowed_attempts == -1:
+                attempts_text = "Unlimited attempts"
+            else:
+                attempts_text = str(allowed_attempts)
+            lines.append(f"🔁 Allowed attempts: *{attempts_text}*")
 
         if has_submitted is not None:
-            status = "Yes" if has_submitted else "No"
-            lines.append(f"📌 Has submitted: *{status}*")
+            if has_submitted:
+                lines.append("📌 You have submitted this assignment.")
+            else:
+                lines.append("📌 You have not submitted this assignment yet.")
+
+        # Blank line before timestamps
+        lines.append("")
+
+        if created_at:
+            pretty_created = _format_canvas_datetime(created_at)
+            if pretty_created:
+                lines.append(f"🕒 Created at: {pretty_created}")
+
+        if due_at:
+            pretty_due = _format_canvas_datetime(due_at)
+            if pretty_due:
+                lines.append(f"📅 Due: {pretty_due}")
 
         text = "\n".join(lines)
 
@@ -742,22 +835,12 @@ async def main_menu_callback(
         due_at = assignment.get("dueAt")
 
         score = submission.get("score")
-        assignment_id = assignment.get("_id")
-        submission_id_value = submission.get("_id")
 
         lines: list[str] = [
             f"📝 *{name}*",
+            "------------------------------------------------",
             "",
         ]
-
-        if assignment_id:
-            lines.append(f"🆔 Assignment ID: `{assignment_id}`")
-
-        if submission_id_value:
-            lines.append(f"🆔 Submission ID: `{submission_id_value}`")
-
-        if due_at:
-            lines.append(f"📅 Due: `{due_at}`")
 
         if points_possible is not None:
             lines.append(f"🏷 Points possible: *{points_possible}*")
@@ -768,7 +851,15 @@ async def main_menu_callback(
             else:
                 lines.append(f"📊 Score: *{score}*")
 
-        if len(lines) == 2:
+        # Blank line before timestamps
+        lines.append("")
+
+        if due_at:
+            pretty_due = _format_canvas_datetime(due_at)
+            if pretty_due:
+                lines.append(f"📅 Due: {pretty_due}")
+
+        if len(lines) <= 3:
             lines.append("No additional details available.")
 
         text = "\n".join(lines)

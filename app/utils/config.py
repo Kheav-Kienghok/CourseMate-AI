@@ -19,6 +19,16 @@ def get_canvas_base_url() -> str | None:
     return os.getenv("HTTP_URL")
 
 
+def get_database_url() -> str | None:
+    """Return SQLAlchemy-style database URL from env (DATABASE_URL).
+
+    Example for PostgreSQL:
+    postgresql+psycopg://user:password@localhost:5432/coursemate
+    """
+
+    return os.getenv("DATABASE_URL")
+
+
 def get_telegram_bot_token() -> str:
     """Return Telegram bot token from env (TELEGRAM_BOT_TOKEN).
 

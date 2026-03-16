@@ -170,3 +170,37 @@ def get_course_assignments(
     )
 
     return filtered_assignments
+
+
+def get_assignment_submission(
+    course_id: int,
+    assignment_id: int,
+    canvas_token: str | None,
+) -> dict[str, Any]:
+    """Return the current user's submission for a specific assignment.
+
+    Uses the /v1/courses/{course_id}/assignments/{assignment_id}/submissions/self
+    endpoint, which resolves "self" based on the token's user.
+    """
+
+    base_url = get_canvas_base_url()
+    if not base_url:
+        raise ValueError("HTTP_URL environment variable is not set")
+
+    if not canvas_token:
+        raise ValueError("Canvas API token is missing")
+
+    api_url = (
+        f"{base_url}/v1/courses/{course_id}/assignments/"
+        f"{assignment_id}/submissions/self"
+    )
+    headers = {"Authorization": f"Bearer {canvas_token}"}
+
+    response = requests.get(api_url, headers=headers, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    if not isinstance(data, dict):
+        raise TypeError("Expected dict for assignment submission from Canvas API")
+
+    return data

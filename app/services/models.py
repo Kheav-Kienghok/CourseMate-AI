@@ -4,7 +4,7 @@ import secrets
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import DateTime, BigInteger, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from services.db import Base
@@ -44,7 +44,7 @@ class User(Base):
     # compatibility with existing databases.
     chat_id: Mapped[int] = mapped_column(
         "telegram_user_id",
-        Integer,
+        BigInteger,
         nullable=False,
         unique=True,
         index=True,

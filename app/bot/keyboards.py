@@ -11,12 +11,11 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("📚 Courses", callback_data="courses"),
-            InlineKeyboardButton("📝 Assignments", callback_data="assignments"),
-        ],
-        [
             InlineKeyboardButton("📊 Grades", callback_data="grades"),
-            InlineKeyboardButton("⏰ Reminders", callback_data="reminders"),
         ],
+        # [
+        #     InlineKeyboardButton("⏰ Reminders", callback_data="reminders"),
+        # ],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
 
@@ -29,10 +28,18 @@ def course_menu_keyboard(course_id: int) -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(
-                "📝 Assignments", callback_data=f"course:{course_id}:assignments"
+                "📋 Roll Call Attendance",
+                callback_data=f"course:{course_id}:rollcall",
             ),
             InlineKeyboardButton(
-                "📊 Grades", callback_data=f"course:{course_id}:grades"
+                "📜 Past Assignments",
+                callback_data=f"course:{course_id}:assignments:past",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📝 Upcoming Assignments",
+                callback_data=f"course:{course_id}:assignments:upcoming",
             ),
         ],
         [InlineKeyboardButton("⬅️ Back to Courses", callback_data="courses")],
@@ -116,6 +123,7 @@ def course_assignments_keyboard(
     assignments: list[dict[str, Any]],
     page: int,
     total_pages: int,
+    status: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Return an inline keyboard for a page of course assignments.
 
@@ -160,7 +168,11 @@ def course_assignments_keyboard(
             nav_row.append(
                 InlineKeyboardButton(
                     "⬅️ Prev",
-                    callback_data=f"course:{course_id}:assignments:{page - 1}",
+                    callback_data=(
+                        f"course:{course_id}:assignments:{status}:{page - 1}"
+                        if status in {"past", "upcoming"}
+                        else f"course:{course_id}:assignments:{page - 1}"
+                    ),
                 )
             )
 
@@ -168,7 +180,11 @@ def course_assignments_keyboard(
             nav_row.append(
                 InlineKeyboardButton(
                     "Next ➡️",
-                    callback_data=f"course:{course_id}:assignments:{page + 1}",
+                    callback_data=(
+                        f"course:{course_id}:assignments:{status}:{page + 1}"
+                        if status in {"past", "upcoming"}
+                        else f"course:{course_id}:assignments:{page + 1}"
+                    ),
                 )
             )
 

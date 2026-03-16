@@ -51,17 +51,3 @@ def decrypt_text(ciphertext: str | None) -> Optional[str]:
         return data.decode("utf-8")
     except InvalidToken:
         return None
-
-
-if __name__ == "__main__":
-    # Simple manual test helper: encrypt and decrypt a sample value
-    sample = input("Enter text to encrypt and decrypt: ")
-
-    encrypted = encrypt_text(sample)
-    print(f"Encrypted: {encrypted}")
-
-    decrypted = decrypt_text(encrypted)
-    print(f"Decrypted: {decrypted}")
-
-    a1 = decrypt_text("gAAAAABpt_PgNWvPnzM_T2IE5_az6zuvwCjuKq6ezfoR2RQ2JtuOGUAutLfSGI9X5bSxnuyfL8MpNvJ60u1XeHOVvMMfvePO83U3fEtTpFziBHgFDXcexHuYP2OJtEaGaUsKWi5JWVyj")
-    print(f"Decrypted known token: {a1}")

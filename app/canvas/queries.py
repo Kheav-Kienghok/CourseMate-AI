@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # GraphQL queries used by the Canvas client.
 
-GET_STUDENT_ASSIGNMENT_QUERY = """query GetStudentAssignment($assignmentLid: ID!, $submissionID: ID!) {
+GET_STUDENT_ASSIGNMENT_QUERY = """query GetStudentAssignment($assignmentLid: ID!, $submissionID: ID!) {  # noqa: E501
   assignment(id: $assignmentLid) {
     _id
     name
