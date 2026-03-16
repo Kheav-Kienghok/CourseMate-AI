@@ -110,9 +110,7 @@ def startup_screen():
 
     env = get_environment()
     console.print(f"\n[bold green]✓ System Ready[/bold green] [dim]({env})[/dim]")
-    console.print(
-        f"[dim]Telegram bot is ready to start in {env} environment.[/dim]"
-    )
+    console.print(f"[dim]Telegram bot is ready to start in {env} environment.[/dim]")
 
 
 def prompt_start_or_exit() -> bool:
@@ -121,9 +119,7 @@ def prompt_start_or_exit() -> bool:
     Returns True to start the bot, False to exit immediately.
     """
 
-    console.print(
-        "\n[cyan]Press [Enter] to start the bot, or type 'q' to quit.[/cyan]"
-    )
+    console.print("\n[cyan]Press [Enter] to start the bot, or type 'q' to quit.[/cyan]")
     try:
         choice = console.input("[bold]> [/bold]").strip().lower()
     except (EOFError, KeyboardInterrupt):

@@ -2,19 +2,32 @@ from __future__ import annotations
 
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from canvas.canvas_client import get_dashboard_cards
-from bot.keyboards import main_menu_keyboard, courses_keyboard
-
+from canvas.canvas_client import (
+    get_course_assignments,
+    get_dashboard_cards,
+    get_student_assignment,
+)
+from bot.keyboards import (
+    assignments_keyboard,
+    course_assignments_keyboard,
+    course_menu_keyboard,
+    courses_keyboard,
+    main_menu_keyboard,
+)
 
 logger = logging.getLogger(__name__)
+
+# Number of assignments to show per page when listing course assignments.
+ASSIGNMENTS_PAGE_SIZE = 5
 
 
 # -----------------------------------------------------------
 # Shared renderer for courses (used by command + callback)
 # -----------------------------------------------------------
+
 
 async def render_courses(message, edit: bool = False) -> None:
     """Render the course list either by replying or editing."""
@@ -96,6 +109,7 @@ async def render_courses(message, edit: bool = False) -> None:
 # Commands
 # -----------------------------------------------------------
 
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
 
@@ -175,17 +189,105 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await render_courses(message)
 
 
-async def assignments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def assignments_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle /assignments command."""
 
     message = update.effective_message
     if not message:
         return
 
+    # For now, use a static sample assignment wired to the GraphQL endpoint.
+    sample_assignments = [
+        {
+            "title": "Sample Assignment",
+            "assignment_lid": "69732",
+            "submission_id": "U3VibWlzc2lvbi0xODk4MDQ3",
+        }
+    ]
+
     await message.reply_text(
-        "📝 Upcoming assignments are not implemented yet.",
-        reply_markup=main_menu_keyboard(),
+        "📝 *Your assignments* (demo):",
+        reply_markup=assignments_keyboard(sample_assignments),
+        parse_mode="Markdown",
     )
+
+
+async def render_course_assignments(
+    message,
+    course_id: int,
+    *,
+    page: int = 1,
+    edit: bool = False,
+) -> None:
+    """Render assignments for a specific course.
+
+    Assignments are already sorted by due date in the Canvas client.
+    This function paginates them, showing ASSIGNMENTS_PAGE_SIZE at a time.
+    """
+
+    try:
+        assignments = get_course_assignments(course_id)
+        assignments = list(reversed(assignments)) # reverse order
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load assignments for course %s: %s", course_id, exc)
+
+        if edit:
+            await message.edit_text(
+                f"Failed to load assignments for course {course_id}: {exc}",
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            await message.reply_text(
+                f"Failed to load assignments for course {course_id}: {exc}",
+                reply_markup=main_menu_keyboard(),
+            )
+        return
+
+    if not assignments:
+        text = f"📝 No assignments found for course `{course_id}`."
+        if edit:
+            await message.edit_text(text, reply_markup=main_menu_keyboard())
+        else:
+            await message.reply_text(text, reply_markup=main_menu_keyboard())
+        return
+
+    total_assignments = len(assignments)
+    page_size = ASSIGNMENTS_PAGE_SIZE
+
+    total_pages = (total_assignments + page_size - 1) // page_size or 1
+
+    if page < 1:
+        page = 1
+    elif page > total_pages:
+        page = total_pages
+
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    page_assignments = assignments[start_index:end_index]
+
+    text = (
+        f"📝 *Assignments for course* `{course_id}` "
+        f"(Page {page}/{total_pages}):"
+    )
+
+    if edit:
+        await message.edit_text(
+            text,
+            reply_markup=course_assignments_keyboard(
+                course_id, page_assignments, page, total_pages
+            ),
+            parse_mode="Markdown",
+        )
+    else:
+        await message.reply_text(
+            text,
+            reply_markup=course_assignments_keyboard(
+                course_id, page_assignments, page, total_pages
+            ),
+            parse_mode="Markdown",
+        )
 
 
 async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,7 +320,10 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # Callback handler
 # -----------------------------------------------------------
 
-async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def main_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle inline keyboard callbacks."""
 
     query = update.callback_query
@@ -260,7 +365,42 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif data and data.startswith("course:"):
 
-        course_id = data.split(":", maxsplit=1)[1]
+        parts = data.split(":")
+
+        # course:{course_id}:assignments[:page]
+        if len(parts) >= 3 and parts[2] == "assignments":
+            try:
+                course_id_int = int(parts[1])
+            except ValueError:
+                logger.warning("Malformed course assignments callback data: %s", data)
+                await query.edit_message_text(
+                    "Could not understand which course's assignments to load.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            page = 1
+            if len(parts) >= 4:
+                try:
+                    page = int(parts[3])
+                except ValueError:
+                    page = 1
+
+            await render_course_assignments(
+                query.message,
+                course_id_int,
+                page=page,
+                edit=True,
+            )
+            return
+
+        # course:{course_id}:grades
+        if len(parts) == 3 and parts[2] == "grades":
+            await grades_command(update, context)
+            return
+
+        # course:{course_id}
+        course_id = parts[1]
 
         dashboard_cards = get_dashboard_cards()
 
@@ -287,8 +427,173 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         section = selected.get("section", "")
 
         await query.edit_message_text(
-            f"You selected *{name} ({code}) Section {section}*.",
-            reply_markup=main_menu_keyboard(),
+            f"You selected *{name} ({code}) - Section {section}*.",
+            reply_markup=course_menu_keyboard(int(course_id)),
+            parse_mode="Markdown",
+        )
+
+    elif data and data.startswith("course-assignment:"):
+        try:
+            _, course_id_str, assignment_id_str = data.split(":", maxsplit=2)
+            course_id = int(course_id_str)
+            assignment_id = int(assignment_id_str)
+        except ValueError:
+            logger.warning("Malformed course-assignment callback data: %s", data)
+            await query.edit_message_text(
+                "Could not understand which assignment you selected.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        try:
+            assignments = get_course_assignments(course_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to load assignments for course %s when opening one: %s",
+                course_id,
+                exc,
+            )
+            await query.edit_message_text(
+                f"Failed to load assignments for course {course_id}: {exc}",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        selected = None
+        for a in assignments:
+            if a.get("id") == assignment_id:
+                selected = a
+                break
+
+        if not selected:
+            await query.edit_message_text(
+                "Assignment not found.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        name = selected.get("name") or f"Assignment {assignment_id}"
+        points_possible = selected.get("points_possible")
+        due_at = selected.get("due_at")
+        created_at = selected.get("created_at")
+        allowed_attempts = selected.get("allowed_attempts")
+        has_submitted = selected.get("has_submitted_submissions")
+
+        lines: list[str] = [
+            f"📝 *{name}*",
+            "",
+            f"🆔 Assignment ID: `{assignment_id}`",
+        ]
+
+        if due_at:
+            lines.append(f"📅 Due: `{due_at}`")
+
+        if created_at:
+            lines.append(f"🕒 Created at: `{created_at}`")
+
+        if points_possible is not None:
+            lines.append(f"🏷 Points possible: *{points_possible}*")
+
+        if allowed_attempts is not None:
+            lines.append(f"🔁 Allowed attempts: *{allowed_attempts}*")
+
+        if has_submitted is not None:
+            status = "Yes" if has_submitted else "No"
+            lines.append(f"📌 Has submitted: *{status}*")
+
+        text = "\n".join(lines)
+
+        back_keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back to assignments",
+                        callback_data=f"course:{course_id}:assignments",
+                    )
+                ]
+            ]
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=back_keyboard,
+            parse_mode="Markdown",
+        )
+
+    elif data and data.startswith("assignment:"):
+        try:
+            _, assignment_lid, submission_id = data.split(":", maxsplit=2)
+        except ValueError:
+            logger.warning("Malformed assignment callback data: %s", data)
+            await query.edit_message_text(
+                "Could not understand which assignment you selected.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        try:
+            result = get_student_assignment(assignment_lid, submission_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to load assignment via GraphQL: %s", exc)
+            await query.edit_message_text(
+                f"Failed to load assignment details: {exc}",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        data_block = result.get("data", {}) if isinstance(result, dict) else {}
+        assignment = data_block.get("assignment") or {}
+        submission = data_block.get("submission") or {}
+
+        name = assignment.get("name", "Assignment")
+        points_possible = assignment.get("pointsPossible")
+        due_at = assignment.get("dueAt")
+
+        score = submission.get("score")
+        assignment_id = assignment.get("_id")
+        submission_id_value = submission.get("_id")
+
+        lines: list[str] = [
+            f"📝 *{name}*",
+            "",
+        ]
+
+        if assignment_id:
+            lines.append(f"🆔 Assignment ID: `{assignment_id}`")
+
+        if submission_id_value:
+            lines.append(f"🆔 Submission ID: `{submission_id_value}`")
+
+        if due_at:
+            lines.append(f"📅 Due: `{due_at}`")
+
+        if points_possible is not None:
+            lines.append(f"🏷 Points possible: *{points_possible}*")
+
+        if score is not None:
+            if points_possible:
+                lines.append(f"📊 Score: *{score}* / *{points_possible}*")
+            else:
+                lines.append(f"📊 Score: *{score}*")
+
+        if len(lines) == 2:
+            lines.append("No additional details available.")
+
+        text = "\n".join(lines)
+
+        back_keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back to assignments", callback_data="assignments"
+                    )
+                ]
+            ]
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=back_keyboard,
             parse_mode="Markdown",
         )
 
@@ -306,6 +611,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # -----------------------------------------------------------
 # Global error handler
 # -----------------------------------------------------------
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Global error handler."""

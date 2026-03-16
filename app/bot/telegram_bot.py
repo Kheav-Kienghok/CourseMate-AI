@@ -22,7 +22,6 @@ from bot.handlers import (
 )
 from utils.config import get_telegram_bot_token
 
-
 logger = logging.getLogger(__name__)
 
 
