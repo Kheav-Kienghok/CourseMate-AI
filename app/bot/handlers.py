@@ -17,6 +17,7 @@ from bot.keyboards import (
     courses_keyboard,
     main_menu_keyboard,
 )
+from services.user_store import get_user_canvas_token, set_user_canvas_token
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,11 @@ ASSIGNMENTS_PAGE_SIZE = 5
 # -----------------------------------------------------------
 
 
-async def render_courses(message, edit: bool = False) -> None:
+async def render_courses(message, canvas_token: str, edit: bool = False) -> None:
     """Render the course list either by replying or editing."""
 
     try:
-        dashboard_cards = get_dashboard_cards()
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to load courses: %s", exc)
 
@@ -186,7 +187,27 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         getattr(user, "username", None),
     )
 
-    await render_courses(message)
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        await message.reply_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    canvas_token = get_user_canvas_token(user_id)
+    if not canvas_token:
+        await message.reply_text(
+            "To load your Canvas courses, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    await render_courses(message, canvas_token=canvas_token)
 
 
 async def assignments_command(
@@ -217,6 +238,7 @@ async def assignments_command(
 async def render_course_assignments(
     message,
     course_id: int,
+    canvas_token: str,
     *,
     page: int = 1,
     edit: bool = False,
@@ -228,8 +250,8 @@ async def render_course_assignments(
     """
 
     try:
-        assignments = get_course_assignments(course_id)
-        assignments = list(reversed(assignments)) # reverse order
+        assignments = get_course_assignments(course_id, canvas_token=canvas_token)
+        assignments = list(reversed(assignments))  # reverse order
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to load assignments for course %s: %s", course_id, exc)
 
@@ -316,6 +338,68 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+async def set_canvas_token_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /settoken command to store a user's Canvas API token.
+
+    Expected usage: /settoken YOUR_CANVAS_TOKEN
+    The token is stored locally in a SQLite database, per Telegram user.
+    """
+
+    message = update.effective_message
+    user = update.effective_user
+
+    if not message or not user:
+        return
+
+    user_id = getattr(user, "id", None)
+    username = getattr(user, "username", None)
+
+    if user_id is None:
+        await message.reply_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "Please send your Canvas API token like this:\n\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    token = " ".join(context.args).strip()
+
+    if not token:
+        await message.reply_text(
+            "The token you provided looks empty. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    set_user_canvas_token(user_id, username, token)
+
+    logger.info(
+        "Stored Canvas token for user_id=%s username=%s", user_id, username
+    )
+    # Try to delete the original message that contained the token
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001
+        # If we cannot delete (e.g. insufficient rights), continue silently.
+        pass
+
+    await message.chat.send_message(
+        "✅ Your Canvas API token has been saved for this bot.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
 # -----------------------------------------------------------
 # Callback handler
 # -----------------------------------------------------------
@@ -346,7 +430,28 @@ async def main_menu_callback(
         await help_command(update, context)
 
     elif data == "courses":
-        await render_courses(query.message, edit=True)
+        user_id = getattr(user, "id", None)
+
+        if user_id is None:
+            await query.edit_message_text(
+                "I couldn't identify your Telegram user. Please try again.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        canvas_token = get_user_canvas_token(user_id)
+        if not canvas_token:
+            await query.edit_message_text(
+                "To load your Canvas courses, please set your personal Canvas API token first.\n\n"
+                "Send it using:\n"
+                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        await render_courses(query.message, canvas_token=canvas_token, edit=True)
 
     elif data == "assignments":
         await assignments_command(update, context)
@@ -386,9 +491,30 @@ async def main_menu_callback(
                 except ValueError:
                     page = 1
 
+            user_id = getattr(user, "id", None)
+            if user_id is None:
+                await query.edit_message_text(
+                    "I couldn't identify your Telegram user. Please try again.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            canvas_token = get_user_canvas_token(user_id)
+            if not canvas_token:
+                await query.edit_message_text(
+                    "To load assignments, please set your personal Canvas API token first.\n\n"
+                    "Send it using:\n"
+                    "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+                    "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+                    parse_mode="Markdown",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
             await render_course_assignments(
                 query.message,
                 course_id_int,
+                canvas_token,
                 page=page,
                 edit=True,
             )
@@ -402,7 +528,27 @@ async def main_menu_callback(
         # course:{course_id}
         course_id = parts[1]
 
-        dashboard_cards = get_dashboard_cards()
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            await query.edit_message_text(
+                "I couldn't identify your Telegram user. Please try again.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        canvas_token = get_user_canvas_token(user_id)
+        if not canvas_token:
+            await query.edit_message_text(
+                "To view course details, please set your personal Canvas API token first.\n\n"
+                "Send it using:\n"
+                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
 
         selected = None
         for course in dashboard_cards:
@@ -445,8 +591,28 @@ async def main_menu_callback(
             )
             return
 
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            await query.edit_message_text(
+                "I couldn't identify your Telegram user. Please try again.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        canvas_token = get_user_canvas_token(user_id)
+        if not canvas_token:
+            await query.edit_message_text(
+                "To load assignments, please set your personal Canvas API token first.\n\n"
+                "Send it using:\n"
+                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
         try:
-            assignments = get_course_assignments(course_id)
+            assignments = get_course_assignments(course_id, canvas_token=canvas_token)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Failed to load assignments for course %s when opening one: %s",
@@ -531,8 +697,30 @@ async def main_menu_callback(
             )
             return
 
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            await query.edit_message_text(
+                "I couldn't identify your Telegram user. Please try again.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        canvas_token = get_user_canvas_token(user_id)
+        if not canvas_token:
+            await query.edit_message_text(
+                "To load assignment details, please set your personal Canvas API token first.\n\n"
+                "Send it using:\n"
+                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
         try:
-            result = get_student_assignment(assignment_lid, submission_id)
+            result = get_student_assignment(
+                assignment_lid, submission_id, canvas_token=canvas_token
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to load assignment via GraphQL: %s", exc)
             await query.edit_message_text(

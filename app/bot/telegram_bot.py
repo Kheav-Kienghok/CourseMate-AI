@@ -19,6 +19,7 @@ from bot.handlers import (
     main_menu_callback,
     reminders_command,
     start_command,
+    set_canvas_token_command,
 )
 from utils.config import get_telegram_bot_token
 
@@ -38,9 +39,9 @@ class CourseMateBot:
     def _register_handlers(self) -> None:
         self._application.add_handler(CommandHandler("start", start_command))
         self._application.add_handler(CommandHandler("help", help_command))
-        # self._application.add_handler(
-        #     CommandHandler("settoken", set_canvas_token_command)
-        # )
+        self._application.add_handler(
+            CommandHandler("settoken", set_canvas_token_command)
+        )
         self._application.add_handler(CommandHandler("courses", courses_command))
         self._application.add_handler(
             CommandHandler("assignments", assignments_command)

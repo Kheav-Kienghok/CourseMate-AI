@@ -4,23 +4,24 @@ from typing import Any
 
 import requests
 
-from utils.config import get_canvas_base_url, get_canvas_token
+from utils.config import get_canvas_base_url
 from canvas.queries import GET_STUDENT_ASSIGNMENT_QUERY
 
 
-def get_dashboard_cards(
-    canvas_token: str | None = get_canvas_token(),
-) -> list[dict[str, Any]]:
+def get_dashboard_cards(canvas_token: str | None) -> list[dict[str, Any]]:
     """Fetch dashboard cards for a specific Canvas user.
 
     Uses HTTP_URL from env and the provided Canvas API token.
     """
 
-    courses: list[dict[str, Any]] = []
-
     base_url = get_canvas_base_url()
     if not base_url:
         raise ValueError("HTTP_URL environment variable is not set")
+
+    if not canvas_token:
+        raise ValueError("Canvas API token is missing")
+
+    courses: list[dict[str, Any]] = []
 
     api_url = f"{base_url}/v1/dashboard/dashboard_cards"
     headers = {"Authorization": f"Bearer {canvas_token}"}
@@ -54,11 +55,14 @@ def get_dashboard_cards(
 def get_student_assignment(
     assignment_lid: str,
     submission_id: str,
-    canvas_token: str | None = get_canvas_token(),
+    canvas_token: str | None,
 ) -> dict[str, Any]:
     base_url = get_canvas_base_url()
     if not base_url:
         raise ValueError("HTTP_URL environment variable is not set")
+
+    if not canvas_token:
+        raise ValueError("Canvas API token is missing")
 
     api_url = f"{base_url}/graphql"
     headers = {
@@ -107,7 +111,7 @@ def get_student_assignment(
 
 def get_course_assignments(
     course_id: int,
-    canvas_token: str | None = get_canvas_token(),
+    canvas_token: str | None,
 ) -> list[dict[str, Any]]:
     """Return all assignments for a given Canvas course.
 
@@ -119,6 +123,9 @@ def get_course_assignments(
     base_url = get_canvas_base_url()
     if not base_url:
         raise ValueError("HTTP_URL environment variable is not set")
+
+    if not canvas_token:
+        raise ValueError("Canvas API token is missing")
 
     api_url = f"{base_url}/v1/courses/{course_id}/assignment_groups"
     headers = {"Authorization": f"Bearer {canvas_token}"}

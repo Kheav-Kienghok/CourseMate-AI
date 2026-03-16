@@ -6,3 +6,18 @@
 2026-03-16 16:00:51,005 | INFO | bot.handlers | handlers.py:338 | Received callback 'course:4347' from user_id=646061562 username=anshishui
 2026-03-16 16:00:54,526 | INFO | bot.handlers | handlers.py:338 | Received callback 'course:4347:assignments' from user_id=646061562 username=anshishui
 2026-03-16 16:00:59,353 | INFO | bot.handlers | handlers.py:338 | Received callback 'course-assignment:4347:70449' from user_id=646061562 username=anshishui
+2026-03-16 18:10:36,711 | INFO | bot.telegram_bot | telegram_bot.py:37 | CourseMateBot initialized and handlers registered
+2026-03-16 18:10:36,713 | INFO | bot.telegram_bot | telegram_bot.py:58 | Starting CourseMateBot polling loop
+2026-03-16 18:10:39,386 | INFO | bot.handlers | handlers.py:124 | Received /start from user_id=646061562 username=anshishui
+2026-03-16 18:10:39,386 | DEBUG | bot.handlers | handlers.py:130 | Start command | user_id=646061562 username=anshishui chat_id=646061562 text=/start
+2026-03-16 18:10:41,612 | INFO | bot.handlers | handlers.py:416 | Received callback 'courses' from user_id=646061562 username=anshishui
+2026-03-16 18:10:49,402 | INFO | bot.handlers | handlers.py:387 | Stored Canvas token for user_id=646061562 username=anshishui
+2026-03-16 18:10:52,915 | INFO | bot.handlers | handlers.py:416 | Received callback 'courses' from user_id=646061562 username=anshishui
+2026-03-16 18:10:53,240 | ERROR | bot.handlers | handlers.py:39 | Failed to load courses: 401 Client Error: Unauthorized for url: https://aupp.instructure.com/api/v1/dashboard/dashboard_cards
+2026-03-16 18:13:56,030 | INFO | bot.telegram_bot | telegram_bot.py:37 | CourseMateBot initialized and handlers registered
+2026-03-16 18:13:56,030 | INFO | bot.telegram_bot | telegram_bot.py:58 | Starting CourseMateBot polling loop
+2026-03-16 18:13:59,035 | INFO | bot.handlers | handlers.py:124 | Received /start from user_id=646061562 username=anshishui
+2026-03-16 18:13:59,035 | DEBUG | bot.handlers | handlers.py:130 | Start command | user_id=646061562 username=anshishui chat_id=646061562 text=/start
+2026-03-16 18:14:01,569 | INFO | bot.handlers | handlers.py:387 | Stored Canvas token for user_id=646061562 username=anshishui
+2026-03-16 18:14:08,912 | INFO | bot.handlers | handlers.py:422 | Received callback 'courses' from user_id=646061562 username=anshishui
+2026-03-16 18:14:09,231 | ERROR | bot.handlers | handlers.py:39 | Failed to load courses: 401 Client Error: Unauthorized for url: https://aupp.instructure.com/api/v1/dashboard/dashboard_cards
