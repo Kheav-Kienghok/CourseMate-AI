@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import logging
 from typing import Final
 
 from telegram.ext import (
@@ -21,6 +23,9 @@ from bot.handlers import (
 from utils.config import get_telegram_bot_token
 
 
+logger = logging.getLogger(__name__)
+
+
 class CourseMateBot:
     """Telegram bot wrapper for CourseMate."""
 
@@ -28,6 +33,8 @@ class CourseMateBot:
         self._token: Final[str] = token or get_telegram_bot_token()
         self._application: Application = ApplicationBuilder().token(self._token).build()
         self._register_handlers()
+
+        logger.info("CourseMateBot initialized and handlers registered")
 
     def _register_handlers(self) -> None:
         self._application.add_handler(CommandHandler("start", start_command))
@@ -48,6 +55,7 @@ class CourseMateBot:
         """Run the bot using long polling."""
         # Disable built-in signal handling so KeyboardInterrupt propagates
         # to app.main(), where we handle it gracefully.
+        logger.info("Starting CourseMateBot polling loop")
         self._application.run_polling(stop_signals=None)
 
 

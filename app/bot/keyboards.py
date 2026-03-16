@@ -10,15 +10,16 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
     keyboard = [
         [
-            InlineKeyboardButton("Courses", callback_data="courses"),
-            InlineKeyboardButton("Assignments", callback_data="assignments"),
+            InlineKeyboardButton("📚 Courses", callback_data="courses"),
+            InlineKeyboardButton("📝 Assignments", callback_data="assignments"),
         ],
         [
-            InlineKeyboardButton("Grades", callback_data="grades"),
-            InlineKeyboardButton("Reminders", callback_data="reminders"),
+            InlineKeyboardButton("📊 Grades", callback_data="grades"),
+            InlineKeyboardButton("⏰ Reminders", callback_data="reminders"),
         ],
-        [InlineKeyboardButton("Help", callback_data="help")],
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
+
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -52,5 +53,8 @@ def courses_keyboard(courses: list[dict[str, Any]]) -> InlineKeyboardMarkup:
     # Fallback to main menu if we somehow had no valid courses
     if not buttons:
         return main_menu_keyboard()
+    
+    # Add navigation
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu")])
 
     return InlineKeyboardMarkup(buttons)
