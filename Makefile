@@ -1,39 +1,66 @@
-# Virtual environment folder
-VENV=.venv
-PYTHON=$(VENV)/bin/python
-PIP=$(VENV)/bin/pip
+# Variables
+VENV = .venv
+PYTHON = $(VENV)/bin/python
+PIP = $(VENV)/bin/pip
+APP = app/main.py
 
 # Default target
-.PHONY: run
-run:
-	source $(VENV)/bin/activate && python app/main.py
+.DEFAULT_GOAL := help
 
-# Create virtual environment
+# -----------------------------
+# Setup
+# -----------------------------
+
+.PHONY: setup
+setup: venv install ## Create venv and install dependencies
+
 .PHONY: venv
-venv:
+venv: ## Create virtual environment
 	python3 -m venv $(VENV)
 
-# Install dependencies
 .PHONY: install
-install:
-	source $(VENV)/bin/activate && pip install -r requirements.txt
+install: ## Install dependencies
+	$(PIP) install -r requirements.txt
 
-# Run the bot using the venv python directly (cleaner)
-.PHONY: start
-start:
-	$(PYTHON) app/main.py
+# -----------------------------
+# Run Application
+# -----------------------------
 
-# Run tests
-.PHONY: test
-test:
-	source $(VENV)/bin/activate && pytest
+.PHONY: run
+run: ## Run the application
+	$(PYTHON) $(APP)
 
-# Format code (optional if you install black)
+.PHONY: dev
+dev: ## Run bot in development mode
+	$(PYTHON) $(APP)
+
+# -----------------------------
+# Code Quality
+# -----------------------------
+
+.PHONY: lint
+lint: ## Run linter
+	$(PYTHON) -m flake8 app
+
 .PHONY: format
-format:
-	source $(VENV)/bin/activate && black .
+format: ## Format code with black
+	$(PYTHON) -m black --target-version py312 app
 
-# Clean cache files
+# -----------------------------
+# Cleanup
+# -----------------------------
+
 .PHONY: clean
-clean:
-	find . -type d -name "__pycache__" -exec rm -r {} +
+clean: ## Remove cache files
+	find . -type d -name "__pycache__" -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete
+
+# -----------------------------
+# Help
+# -----------------------------
+
+.PHONY: help
+help:
+	@echo "Available commands:"
+	@grep -E '^[a-zA-Z_-]+:.*?## ' Makefile | \
+	awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'

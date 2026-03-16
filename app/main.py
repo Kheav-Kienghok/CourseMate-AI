@@ -1,22 +1,25 @@
-import requests
-import os
-import dotenv
-import pprint
+from __future__ import annotations
 
-dotenv.load_dotenv()
+import sys
 
-APP_URL = os.getenv("HTTP_URL")
-TOKEN = os.getenv("CANVAS_TOKEN")
-
-API_URL = f"{APP_URL}/dashboard/dashboard_cards"
-
-headers = {
-    "Authorization": f"Bearer {TOKEN}"
-}
-
-response = requests.get(API_URL, headers=headers)
-data = response.json()
+from bot.telegram_bot import run_bot
+from ui.terminal import startup_screen, prompt_start_or_exit
 
 
-print("Dashboard Cards:")
-pprint.pprint(data)
+def main() -> None:
+    """Entry point for the application."""
+
+    try:
+        startup_screen()
+        if not prompt_start_or_exit():
+            sys.exit(0)
+
+        run_bot()
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as exc:  # noqa: BLE001
+        sys.exit(1)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
