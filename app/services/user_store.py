@@ -1,91 +1,96 @@
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
 from typing import Optional
 
-
-# Database file stored at the project root
-_DB_PATH = Path(__file__).resolve().parents[2] / "coursemate.sqlite3"
-
-
-def _get_connection() -> sqlite3.Connection:
-    """Return a new SQLite connection.
-
-    The connection is not cached so that each call is short-lived and safe
-    across threads used by python-telegram-bot.
-    """
-
-    # Ensure parent directory exists (it should, as it's the project root)
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(_DB_PATH)
-
-
-def _init_db() -> None:
-    """Create the user token table if it does not exist."""
-
-    conn = _get_connection()
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_canvas_tokens (
-                telegram_user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                token TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# Initialize database schema at import time
-_init_db()
+from services.db import SessionLocal
+from services.models import User
+from utils.crypto import decrypt_text, encrypt_text
 
 
 def set_user_canvas_token(
-    telegram_user_id: int, username: Optional[str], token: str
+    chat_id: int,
+    username: Optional[str],
+    token: str,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
 ) -> None:
-    """Create or update the Canvas API token for a Telegram user.
+    """Create or update the Canvas API token for a Telegram user using ORM.
 
-    The token is stored locally in a SQLite database file. It is not
-    encrypted, so make sure the host machine is trusted.
+    The token is stored in the user_canvas_tokens table via SQLAlchemy.
+    It is not encrypted, so make sure the host machine is trusted.
     """
 
-    conn = _get_connection()
-    try:
-        conn.execute(
-            """
-            INSERT INTO user_canvas_tokens (telegram_user_id, username, token)
-            VALUES (?, ?, ?)
-            ON CONFLICT(telegram_user_id) DO UPDATE SET
-                username=excluded.username,
-                token=excluded.token,
-                updated_at=CURRENT_TIMESTAMP
-            """,
-            (telegram_user_id, username, token),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    with SessionLocal() as session:
+        user = session.query(User).filter_by(chat_id=chat_id).one_or_none()
+
+        if user is None:
+            # Fallbacks for required name fields if Telegram does not
+            # provide them.
+            resolved_first = first_name or username or "Unknown"
+            resolved_last = last_name or username or "User"
+
+            user = User(
+                chat_id=chat_id,
+                username=username or str(chat_id),
+                firstname=resolved_first,
+                lastname=resolved_last,
+                canvas_token=encrypt_text(token),
+            )
+            session.add(user)
+        else:
+            user.canvas_token = encrypt_text(token)
+            if username is not None:
+                user.username = username
+            if first_name is not None:
+                user.firstname = first_name
+            if last_name is not None:
+                user.lastname = last_name
+
+        session.commit()
 
 
-def get_user_canvas_token(telegram_user_id: int) -> Optional[str]:
-    """Return the stored Canvas API token for the given Telegram user.
+def get_user_canvas_token(chat_id: int) -> Optional[str]:
+    """Return the stored Canvas API token for the given chat.
 
     Returns None if no token has been stored yet.
     """
 
-    conn = _get_connection()
-    try:
-        cur = conn.execute(
-            "SELECT token FROM user_canvas_tokens WHERE telegram_user_id = ?",
-            (telegram_user_id,),
+    with SessionLocal() as session:
+        user = session.query(User).filter_by(chat_id=chat_id).one_or_none()
+        if user is None:
+            return None
+
+        return decrypt_text(user.canvas_token)
+
+
+def create_user(lastname: str, firstname: str, username: str) -> User:
+    """Create a new user in the users table.
+
+    A secure token is generated automatically by the ORM model.
+    Returns the persisted User instance.
+    """
+
+    with SessionLocal() as session:
+        user = User(
+            lastname=lastname,
+            firstname=firstname,
+            username=username,
         )
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+def get_user_by_id(user_id: str) -> Optional[User]:
+    """Return a user by primary key, or None if not found."""
+
+    with SessionLocal() as session:
+        return session.get(User, user_id)
+
+
+def get_user_by_username(username: str) -> Optional[User]:
+    """Return the user with the given username, or None if missing."""
+
+    with SessionLocal() as session:
+        return session.query(User).filter_by(username=username).first()

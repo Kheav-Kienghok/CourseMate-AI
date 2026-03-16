@@ -176,7 +176,8 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle /courses command."""
 
     message = update.effective_message
-    if not message:
+    chat = update.effective_chat
+    if not message or not chat:
         return
 
     user = update.effective_user
@@ -187,15 +188,15 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         getattr(user, "username", None),
     )
 
-    user_id = getattr(user, "id", None)
-    if user_id is None:
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
         await message.reply_text(
             "I couldn't identify your Telegram user. Please try again.",
             reply_markup=main_menu_keyboard(),
         )
         return
 
-    canvas_token = get_user_canvas_token(user_id)
+    canvas_token = get_user_canvas_token(chat_id)
     if not canvas_token:
         await message.reply_text(
             "To load your Canvas courses, please set your personal Canvas API token first.\n\n"
@@ -289,10 +290,7 @@ async def render_course_assignments(
     end_index = start_index + page_size
     page_assignments = assignments[start_index:end_index]
 
-    text = (
-        f"📝 *Assignments for course* `{course_id}` "
-        f"(Page {page}/{total_pages}):"
-    )
+    text = f"📝 *Assignments for course* `{course_id}` " f"(Page {page}/{total_pages}):"
 
     if edit:
         await message.edit_text(
@@ -349,14 +347,17 @@ async def set_canvas_token_command(
 
     message = update.effective_message
     user = update.effective_user
+    chat = update.effective_chat
 
-    if not message or not user:
+    if not message or not user or not chat:
         return
 
-    user_id = getattr(user, "id", None)
+    chat_id = getattr(chat, "id", None)
     username = getattr(user, "username", None)
+    first_name = getattr(user, "first_name", None)
+    last_name = getattr(user, "last_name", None)
 
-    if user_id is None:
+    if chat_id is None:
         await message.reply_text(
             "I couldn't identify your Telegram user. Please try again.",
             reply_markup=main_menu_keyboard(),
@@ -382,11 +383,9 @@ async def set_canvas_token_command(
         )
         return
 
-    set_user_canvas_token(user_id, username, token)
+    set_user_canvas_token(chat_id, username, token, first_name, last_name)
 
-    logger.info(
-        "Stored Canvas token for user_id=%s username=%s", user_id, username
-    )
+    logger.info("Stored Canvas token for chat_id=%s username=%s", chat_id, username)
     # Try to delete the original message that contained the token
     try:
         await message.delete()
@@ -430,16 +429,17 @@ async def main_menu_callback(
         await help_command(update, context)
 
     elif data == "courses":
-        user_id = getattr(user, "id", None)
+        chat = query.message.chat if query.message else None
+        chat_id = getattr(chat, "id", None) if chat else None
 
-        if user_id is None:
+        if chat_id is None:
             await query.edit_message_text(
                 "I couldn't identify your Telegram user. Please try again.",
                 reply_markup=main_menu_keyboard(),
             )
             return
 
-        canvas_token = get_user_canvas_token(user_id)
+        canvas_token = get_user_canvas_token(chat_id)
         if not canvas_token:
             await query.edit_message_text(
                 "To load your Canvas courses, please set your personal Canvas API token first.\n\n"
@@ -491,15 +491,16 @@ async def main_menu_callback(
                 except ValueError:
                     page = 1
 
-            user_id = getattr(user, "id", None)
-            if user_id is None:
+            chat = query.message.chat if query.message else None
+            chat_id = getattr(chat, "id", None) if chat else None
+            if chat_id is None:
                 await query.edit_message_text(
                     "I couldn't identify your Telegram user. Please try again.",
                     reply_markup=main_menu_keyboard(),
                 )
                 return
 
-            canvas_token = get_user_canvas_token(user_id)
+            canvas_token = get_user_canvas_token(chat_id)
             if not canvas_token:
                 await query.edit_message_text(
                     "To load assignments, please set your personal Canvas API token first.\n\n"
@@ -528,15 +529,16 @@ async def main_menu_callback(
         # course:{course_id}
         course_id = parts[1]
 
-        user_id = getattr(user, "id", None)
-        if user_id is None:
+        chat = query.message.chat if query.message else None
+        chat_id = getattr(chat, "id", None) if chat else None
+        if chat_id is None:
             await query.edit_message_text(
                 "I couldn't identify your Telegram user. Please try again.",
                 reply_markup=main_menu_keyboard(),
             )
             return
 
-        canvas_token = get_user_canvas_token(user_id)
+        canvas_token = get_user_canvas_token(chat_id)
         if not canvas_token:
             await query.edit_message_text(
                 "To view course details, please set your personal Canvas API token first.\n\n"
@@ -591,15 +593,16 @@ async def main_menu_callback(
             )
             return
 
-        user_id = getattr(user, "id", None)
-        if user_id is None:
+        chat = query.message.chat if query.message else None
+        chat_id = getattr(chat, "id", None) if chat else None
+        if chat_id is None:
             await query.edit_message_text(
                 "I couldn't identify your Telegram user. Please try again.",
                 reply_markup=main_menu_keyboard(),
             )
             return
 
-        canvas_token = get_user_canvas_token(user_id)
+        canvas_token = get_user_canvas_token(chat_id)
         if not canvas_token:
             await query.edit_message_text(
                 "To load assignments, please set your personal Canvas API token first.\n\n"
@@ -697,15 +700,16 @@ async def main_menu_callback(
             )
             return
 
-        user_id = getattr(user, "id", None)
-        if user_id is None:
+        chat = query.message.chat if query.message else None
+        chat_id = getattr(chat, "id", None) if chat else None
+        if chat_id is None:
             await query.edit_message_text(
                 "I couldn't identify your Telegram user. Please try again.",
                 reply_markup=main_menu_keyboard(),
             )
             return
 
-        canvas_token = get_user_canvas_token(user_id)
+        canvas_token = get_user_canvas_token(chat_id)
         if not canvas_token:
             await query.edit_message_text(
                 "To load assignment details, please set your personal Canvas API token first.\n\n"

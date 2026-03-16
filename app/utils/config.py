@@ -59,6 +59,21 @@ def get_telegram_allowed_username() -> str | None:
     return raw.lstrip("@").lower()
 
 
+def get_encryption_secret() -> str:
+    """Return application-level encryption secret.
+
+    Used to derive a key for encrypting sensitive data (e.g. Canvas tokens).
+    Must be set via COURSEMATE_ENCRYPTION_SECRET in the environment.
+    """
+
+    secret = os.getenv("COURSEMATE_ENCRYPTION_SECRET")
+    if not secret:
+        raise ValueError(
+            "COURSEMATE_ENCRYPTION_SECRET environment variable is not set",
+        )
+    return secret
+
+
 def is_telegram_user_allowed(*, chat_id: int | None, username: str | None) -> bool:
     """Return True if the Telegram user is allowed to use the bot.
 

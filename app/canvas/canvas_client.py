@@ -156,9 +156,7 @@ def get_course_assignments(
                     "allowed_attempts": a.get("allowed_attempts"),
                     "lock_at": (a.get("lock_info") or {}).get("lock_at"),
                     "lti_context_id": a.get("lti_context_id"),
-                    "has_submitted_submissions": a.get(
-                        "has_submitted_submissions"
-                    ),
+                    "has_submitted_submissions": a.get("has_submitted_submissions"),
                 }
             )
 
