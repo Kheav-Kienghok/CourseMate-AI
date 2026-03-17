@@ -11,11 +11,12 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("📚 Courses", callback_data="courses"),
-            InlineKeyboardButton("📊 Grades", callback_data="grades"),
+            InlineKeyboardButton("📋 Assignments", callback_data="assignments"),
         ],
-        # [
-        #     InlineKeyboardButton("⏰ Reminders", callback_data="reminders"),
-        # ],
+        [
+            InlineKeyboardButton("📊 Grades", callback_data="grades"),
+            InlineKeyboardButton("⏰ Reminders", callback_data="reminders"),
+        ],
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ]
 
