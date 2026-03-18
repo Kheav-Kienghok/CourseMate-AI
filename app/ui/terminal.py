@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import time
 import platform
 import sys
+import time
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
-
 from utils.config import get_environment
 
 console = Console()

@@ -4,7 +4,6 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
 from utils.config import get_database_url
 
 _DB_PATH = Path(__file__).resolve().parents[2] / "coursemate.sqlite3"

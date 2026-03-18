@@ -4,7 +4,7 @@ import sys
 
 from bot.telegram_bot import run_bot
 from services.db import init_db
-from ui.terminal import startup_screen, prompt_start_or_exit
+from ui.terminal import prompt_start_or_exit, startup_screen
 from utils.logging import setup_logging
 
 

@@ -4,11 +4,12 @@ import logging
 from typing import Final
 
 from telegram.ext import (
-    ApplicationBuilder,
     Application,
-    CommandHandler,
+    ApplicationBuilder,
     CallbackQueryHandler,
+    CommandHandler,
 )
+from utils.config import get_telegram_bot_token
 
 from bot.handlers import (
     courses_command,
@@ -17,10 +18,9 @@ from bot.handlers import (
     help_command,
     main_menu_callback,
     reminders_command,
-    start_command,
     set_canvas_token_command,
+    start_command,
 )
-from utils.config import get_telegram_bot_token
 
 logger = logging.getLogger(__name__)
 

@@ -1,10 +1,9 @@
+# -----------------------------
 # Variables
-VENV = .venv
-PYTHON = $(VENV)/bin/python
-PIP = $(VENV)/bin/pip
+# -----------------------------
+UV = uv
 APP = app/main.py
 
-# Default target
 .DEFAULT_GOAL := help
 
 # -----------------------------
@@ -12,15 +11,12 @@ APP = app/main.py
 # -----------------------------
 
 .PHONY: setup
-setup: venv install ## Create venv and install dependencies
+setup: ## Install dependencies including dev tools
+	$(UV) sync --extra dev
 
-.PHONY: venv
-venv: ## Create virtual environment
-	python3 -m venv $(VENV)
-
-.PHONY: install
-install: ## Install dependencies
-	$(PIP) install -r requirements.txt
+.PHONY: lock
+lock: ## Update dependency lockfile
+	$(UV) lock
 
 # -----------------------------
 # Run Application
@@ -28,11 +24,11 @@ install: ## Install dependencies
 
 .PHONY: run
 run: ## Run the application
-	$(PYTHON) $(APP)
+	$(UV) run python $(APP)
 
 .PHONY: dev
-dev: ## Run bot in development mode
-	$(PYTHON) $(APP)
+dev: ## Run bot with auto-reload
+	$(UV) run watchfiles python $(APP)
 
 # -----------------------------
 # Code Quality
@@ -40,11 +36,31 @@ dev: ## Run bot in development mode
 
 .PHONY: lint
 lint: ## Run linter
-	$(PYTHON) -m flake8 app
+	$(UV) run ruff check --fix app
+
+.PHONY: lint-fix
+lint-fix: ## Auto-fix lint issues
+	$(UV) run ruff check --fix app
 
 .PHONY: format
-format: ## Format code with black
-	$(PYTHON) -m black --target-version py312 app
+format: ## Format code
+	$(UV) run black app
+
+.PHONY: format-check
+format-check: ## Check formatting
+	$(UV) run black --check app
+
+.PHONY: typecheck
+typecheck: ## Run type checking
+	$(UV) run mypy app
+
+# -----------------------------
+# Testing
+# -----------------------------
+
+.PHONY: test
+test: ## Run tests
+	$(UV) run pytest
 
 # -----------------------------
 # Cleanup
@@ -54,6 +70,9 @@ format: ## Format code with black
 clean: ## Remove cache files
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+	rm -rf .pytest_cache
+	rm -rf .mypy_cache
+	rm -rf .ruff_cache
 
 # -----------------------------
 # Help

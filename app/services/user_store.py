@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+from utils.crypto import decrypt_text, encrypt_text
+
 from services.db import SessionLocal
 from services.models import User
-from utils.crypto import decrypt_text, encrypt_text
 
 
 def set_user_canvas_token(

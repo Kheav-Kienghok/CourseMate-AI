@@ -1,9 +1,10 @@
 [project]
 name = "telegrambot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Telegram bot project"
 readme = "README.md"
 requires-python = ">=3.12"
+
 dependencies = [
     "python-dotenv>=1.2.2",
     "python-telegram-bot>=22.6",
@@ -12,7 +13,52 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "cryptography>=42.0.0",
     "pprintpp>=0.4.0",
-    "black>=26.3.1",
-    "flake8>=7.3.0",
     "psycopg2-binary>=2.9.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.1.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+    "pytest>=7.4.0",
+    "watchfiles>=0.21.0",
+    "types-requests",
+]
+
+# -----------------------------
+# Black configuration
+# -----------------------------
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+# -----------------------------
+# Ruff configuration
+# -----------------------------
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bot", "canvas", "services", "utils", "ui"]
+
+# -----------------------------
+# Mypy configuration
+# -----------------------------
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "types-requests>=2.32.4.20260107",
 ]
