@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from utils.config import get_canvas_base_url
 
 from canvas.queries import GET_STUDENT_ASSIGNMENT_QUERY
+from utils.config import get_canvas_base_url
 
 
 def get_dashboard_cards(canvas_token: str | None) -> list[dict[str, Any]]:

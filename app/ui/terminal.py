@@ -11,6 +11,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
+
 from utils.config import get_environment
 
 console = Console()
@@ -114,11 +115,13 @@ def startup_screen():
 
 def prompt_start_or_exit() -> bool:
     """Ask the user whether to start the bot or exit. Skips prompt in production."""
-    
+
     env = get_environment()
-    
+
     if env.lower() == "production":
-        console.print("\n[bold green]🚀 Starting Telegram Bot in Production...[/bold green]")
+        console.print(
+            "\n[bold green]🚀 Starting Telegram Bot in Production...[/bold green]"
+        )
         return True
 
     console.print("\n[cyan]Press [Enter] to start the bot, or type 'q' to quit.[/cyan]")

@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any, cast
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from canvas.canvas_client import get_course_assignments, get_dashboard_cards
 from bot.keyboards import (
     course_assignments_keyboard,
     courses_keyboard,
     main_menu_keyboard,
+    month_assignments_keyboard,
 )
+from canvas.canvas_client import get_course_assignments, get_dashboard_cards
 from services.user_store import get_user_canvas_token, set_user_canvas_token
 
 logger = logging.getLogger(__name__)
@@ -173,7 +175,11 @@ async def render_course_assignments(
         # - past: nearest to today first (latest due date first)
         # - upcoming: nearest deadline first (earliest due date first)
         reverse = status == "past"
-        with_due.sort(key=lambda pair: pair[0], reverse=reverse)
+
+        with_due.sort(
+            key=lambda pair: cast(Any, pair[0]),
+            reverse=reverse,
+        )
 
         sorted_with_due = [a for _, a in with_due]
 
@@ -214,6 +220,24 @@ async def render_course_assignments(
     end_index = start_index + page_size
     page_assignments = assignments[start_index:end_index]
 
+    # Build a human-friendly course label (name instead of raw ID)
+    course_label = str(course_id)
+    try:
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+        for course in dashboard_cards:
+            if str(course.get("id")) == str(course_id):
+                name = (
+                    course.get("shortName")
+                    or course.get("originalName")
+                    or str(course_id)
+                )
+                code = course.get("courseCode", "")
+                section = course.get("section", "")
+                course_label = f"{name} ({code}) - Section {section}".strip()
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not load course name for course_id=%s: %s", course_id, exc)
+
     if status == "past":
         label = "Past assignments"
     elif status == "upcoming":
@@ -221,7 +245,7 @@ async def render_course_assignments(
     else:
         label = "Assignments"
 
-    text = f"📝 *{label} for course* `{course_id}` " f"(Page {page}/{total_pages}):"
+    text = f"📝 *{label} for* _{course_label}_ " f"(Page {page}/{total_pages}):"
 
     if edit:
         await message.edit_text(
@@ -237,6 +261,247 @@ async def render_course_assignments(
             reply_markup=course_assignments_keyboard(
                 course_id, page_assignments, page, total_pages, status
             ),
+            parse_mode="Markdown",
+        )
+
+
+async def render_month_assignments_overview(
+    message,
+    canvas_token: str,
+    *,
+    filter_mode: str = "todo",
+    edit: bool = False,
+    compact: bool = True,
+) -> None:
+    """Render a this-month assignments overview across all active courses.
+
+    filter_mode:
+      - "todo": not submitted and not past due
+      - "submitted": submitted assignments
+      - "past": past-due and not submitted
+    """
+
+    try:
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load courses for assignments overview: %s", exc)
+
+        await message.reply_text(
+            f"Failed to load courses: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if not dashboard_cards:
+        await message.reply_text(
+            "No courses found on your Canvas dashboard.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    today = datetime.now(timezone.utc).date()
+    current_month = today.month
+    current_year = today.year
+
+    all_month_assignments: list[dict] = []
+
+    for course in dashboard_cards:
+        if course.get("enrollmentState") != "active":
+            continue
+
+        course_id = course.get("id")
+        if course_id is None:
+            continue
+
+        course_name = (
+            course.get("shortName") or course.get("originalName") or str(course_id)
+        )
+
+        try:
+            assignments = get_course_assignments(course_id, canvas_token=canvas_token)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to load assignments for course %s: %s", course_id, exc
+            )
+            continue
+
+        for a in assignments:
+            due_at = a.get("due_at")
+            if not due_at:
+                continue
+
+            try:
+                if due_at.endswith("Z"):
+                    dt = datetime.strptime(due_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=timezone.utc,
+                    )
+                else:
+                    dt = datetime.fromisoformat(due_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+            except Exception:  # noqa: BLE001
+                continue
+
+            if dt.month != current_month or dt.year != current_year:
+                continue
+
+            due_date = dt.date()
+            has_submitted = bool(a.get("has_submitted_submissions"))
+
+            if has_submitted:
+                bucket = "submitted"
+            elif due_date < today:
+                bucket = "past"
+            else:
+                bucket = "todo"
+
+            all_month_assignments.append(
+                {
+                    "course_id": course_id,
+                    "course_name": course_name,
+                    "assignment": a,
+                    "due_dt": dt,
+                    "bucket": bucket,
+                }
+            )
+
+    if not all_month_assignments:
+        await message.reply_text(
+            "No assignments with due dates in this month were found.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    todo_count = sum(1 for item in all_month_assignments if item["bucket"] == "todo")
+    submitted_count = sum(
+        1 for item in all_month_assignments if item["bucket"] == "submitted"
+    )
+    past_count = sum(1 for item in all_month_assignments if item["bucket"] == "past")
+
+    total_count = len(all_month_assignments)
+
+    # Determine the most urgent upcoming (to-do) assignment
+    upcoming_items = [
+        item
+        for item in all_month_assignments
+        if item["bucket"] == "todo" and item["due_dt"].date() >= today
+    ]
+    upcoming_items.sort(key=lambda item: item["due_dt"])
+
+    urgent_item = upcoming_items[0] if upcoming_items else None
+    urgent_course_id: int | None = urgent_item["course_id"] if urgent_item else None
+    urgent_assignment_id: int | None = (
+        urgent_item["assignment"].get("id") if urgent_item else None
+    )
+
+    def _relative_due_phrase(due_dt) -> str:
+        days = (due_dt.date() - today).days
+        if days == 0:
+            return "Due today"
+        if days == 1:
+            return "Due tomorrow"
+        if days > 1:
+            return f"Due in {days} days"
+        # Past
+        days_ago = abs(days)
+        if days_ago == 1:
+            return "1 day ago"
+        return f"{days_ago} days ago"
+
+    def _priority_badge(due_dt) -> str:
+        days = (due_dt.date() - today).days
+        if days <= 1:
+            return "🔥"
+        if days <= 7:
+            return "⏳"
+        return "📌"
+
+    # Header with month + progress summary
+    lines: list[str] = []
+    month_label = today.strftime("%B %Y")
+    lines.append(f"*{month_label} — Assignments*")
+    lines.append(
+        f"Total {total_count} · Completed {submitted_count} · Pending {todo_count} · Overdue {past_count}"
+    )
+
+    # Urgent focus block
+    if urgent_item:
+        a = urgent_item["assignment"]
+        course_name = urgent_item["course_name"]
+        name = a.get("name") or f"Assignment {a.get('id')}"
+        due_dt = urgent_item["due_dt"]
+        badge = _priority_badge(due_dt)
+        due_phrase = _relative_due_phrase(due_dt)
+
+        lines.append("")
+        lines.append(f"Next up: {badge} *{name}* — _{course_name}_")
+        lines.append(f"{due_phrase}")
+        lines.append("Tip: Reserve 20–30 minutes to start this." )
+
+    # Grouped sections: Upcoming (todo), Submitted, Past Due
+    def _render_section(title: str, items: list[dict], *, past: bool = False) -> None:
+        if not items:
+            return
+
+        lines.append("")
+        lines.append(f"*{title}*")
+
+        # Sort nearest deadlines first; for past, nearest in the past first
+        items_sorted = sorted(
+            items,
+            key=lambda item: item["due_dt"],
+            reverse=past,
+        )
+
+        if compact:
+            items_sorted = items_sorted[:5]
+
+        for item in items_sorted:
+            a = item["assignment"]
+            course_name = item["course_name"]
+            name = a.get("name") or f"Assignment {a.get('id')}"
+            due_dt = item["due_dt"]
+            badge = _priority_badge(due_dt)
+            due_phrase = _relative_due_phrase(due_dt)
+
+            lines.append(
+                f"• {badge} *{name}* — _{course_name}_\n  {due_phrase}"
+            )
+
+    upcoming_section = [
+        item
+        for item in all_month_assignments
+        if item["bucket"] == "todo" and item["due_dt"].date() >= today
+    ]
+    submitted_section = [
+        item for item in all_month_assignments if item["bucket"] == "submitted"
+    ]
+    past_section = [
+        item for item in all_month_assignments if item["bucket"] == "past"
+    ]
+
+    _render_section("Upcoming", upcoming_section, past=False)
+    _render_section("Submitted", submitted_section, past=False)
+    _render_section("Past Due", past_section, past=True)
+
+    if compact and (total_count > 5):
+        lines.append("")
+        lines.append("Showing a quick summary. Tap *View All* for full details.")
+
+    text = "\n".join(lines)
+
+    reply_markup = month_assignments_keyboard(
+        urgent_course_id,
+        urgent_assignment_id,
+        compact=compact,
+    )
+
+    if edit:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await message.reply_text(
+            text,
+            reply_markup=reply_markup,
             parse_mode="Markdown",
         )
 
@@ -299,7 +564,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "*📚 Canvas Bot Commands*\n\n"
         "🚀 */start* — Introduce the bot\n"
         "📖 */courses* — Show your courses\n"
-        "📝 */assignments* — Upcoming assignments\n"
+        "📝 */assignments* — This month's assignment To-Do list\n"
         "📊 */grades* — Current grades\n"
         "⏰ */reminders* — Manage reminders\n"
         "❓ */help* — Show this message",
@@ -332,6 +597,7 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     canvas_token = get_user_canvas_token(chat_id)
+
     if not canvas_token:
         await message.reply_text(
             "To load your Canvas courses, please set your personal Canvas API token first.\n\n"
@@ -344,6 +610,57 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     await render_courses(message, canvas_token=canvas_token)
+
+
+async def assignments_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /assignments command.
+
+    Shows a this-month overview of assignments across all active courses.
+    """
+
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    user = update.effective_user
+
+    logger.info(
+        "Received /assignments from user_id=%s username=%s",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+    )
+
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        await message.reply_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    canvas_token = get_user_canvas_token(chat_id)
+
+    if not canvas_token:
+        await message.reply_text(
+            "To load your assignments, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    await render_month_assignments_overview(
+        message,
+        canvas_token=canvas_token,
+        filter_mode="todo",
+        edit=False,
+        compact=True,
+    )
 
 
 async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

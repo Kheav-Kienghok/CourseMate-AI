@@ -82,6 +82,57 @@ def courses_keyboard(courses: list[dict[str, Any]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def month_assignments_keyboard(
+    urgent_course_id: int | None,
+    urgent_assignment_id: int | None,
+    *,
+    compact: bool = True,
+) -> InlineKeyboardMarkup:
+    """Inline keyboard for this month's assignments overview.
+
+    The layout is action‑oriented with at most 2–3 buttons per row.
+    """
+
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    # Primary actions for the most urgent upcoming assignment
+    if urgent_course_id is not None and urgent_assignment_id is not None:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "✅ Mark Done",
+                    callback_data=(
+                        f"assignments:urgent:done:{urgent_course_id}:{urgent_assignment_id}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "⏰ Remind Me",
+                    callback_data=(
+                        f"assignments:urgent:remind:{urgent_course_id}:{urgent_assignment_id}"
+                    ),
+                ),
+            ]
+        )
+
+    # Secondary navigation / scope actions
+    # Button always points to the *other* mode so tapping it
+    # actually changes what we render and avoids "message is not modified".
+    target_mode = "full" if compact else "compact"
+    toggle_label = "View All" if compact else "Show Less"
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                toggle_label,
+                callback_data=f"assignments:this_month:{target_mode}",
+            ),
+            InlineKeyboardButton("⬅️ Menu", callback_data="menu"),
+        ]
+    )
+
+    return InlineKeyboardMarkup(buttons)
+
+
 def assignments_keyboard(assignments: list[dict[str, str]]) -> InlineKeyboardMarkup:
     """Return an inline keyboard with one button per assignment.
 

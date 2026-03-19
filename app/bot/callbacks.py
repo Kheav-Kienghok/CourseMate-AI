@@ -11,6 +11,7 @@ from bot.commands import (
     reminders_command,
     render_course_assignments,
     render_courses,
+    render_month_assignments_overview,
 )
 from bot.datetime_utils import _format_due_with_relative
 from bot.keyboards import course_menu_keyboard, main_menu_keyboard
@@ -38,6 +39,7 @@ async def _require_canvas_token(query, action_text: str) -> str | None:
         return None
 
     canvas_token = get_user_canvas_token(chat_id)
+
     if not canvas_token:
         await query.edit_message_text(
             f"To {action_text}, please set your personal Canvas API token first.\n\n"
@@ -76,6 +78,22 @@ async def main_menu_callback(
     if data == "help":
         await help_command(update, context)
 
+    elif data == "assignments":
+        canvas_token = await _require_canvas_token(
+            query,
+            "view your assignments",
+        )
+        if not canvas_token:
+            return
+
+        await render_month_assignments_overview(
+            query.message,
+            canvas_token=canvas_token,
+            filter_mode="todo",
+            edit=True,
+            compact=True,
+        )
+
     elif data == "courses":
         canvas_token = await _require_canvas_token(
             query,
@@ -97,6 +115,47 @@ async def main_menu_callback(
             "Main menu:",
             reply_markup=main_menu_keyboard(),
         )
+
+    elif data and data.startswith("assignments:this_month:"):
+        parts = data.split(":")
+        view_mode = parts[2] if len(parts) >= 3 else "compact"
+
+        compact = view_mode != "full"
+
+        canvas_token = await _require_canvas_token(
+            query,
+            "view your assignments",
+        )
+        if not canvas_token:
+            return
+
+        await render_month_assignments_overview(
+            query.message,
+            canvas_token=canvas_token,
+            filter_mode="todo",
+            edit=True,
+            compact=compact,
+        )
+
+    elif data and data.startswith("assignments:urgent:"):
+        # Lightweight actions for the most urgent upcoming assignment.
+        # These do not send new messages; they acknowledge via callback
+        # and keep the current view in place.
+        parts = data.split(":")
+        if len(parts) == 5:
+            _scope, _urgent, action, course_id_str, assignment_id_str = parts
+        else:
+            action = ""
+
+        if action == "done":
+            await query.answer("Marked as done (in CourseMate view).", show_alert=False)
+        elif action == "remind":
+            await query.answer(
+                "Reminder noted. I will surface this again as it gets closer.",
+                show_alert=False,
+            )
+        else:
+            await query.answer("Action not recognized.")
 
     elif data and data.startswith("course:"):
 
