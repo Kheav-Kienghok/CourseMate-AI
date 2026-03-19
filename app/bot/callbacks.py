@@ -5,24 +5,51 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from bot.commands import (
+    grades_command,
+    help_command,
+    reminders_command,
+    render_course_assignments,
+    render_courses,
+)
+from bot.datetime_utils import _format_due_with_relative
+from bot.keyboards import course_menu_keyboard, main_menu_keyboard
 from canvas.canvas_client import (
+    get_assignment_submission,
     get_course_assignments,
     get_dashboard_cards,
     get_student_assignment,
-    get_assignment_submission,
 )
-from bot.keyboards import course_menu_keyboard, main_menu_keyboard
 from services.user_store import get_user_canvas_token
-from bot.commands import (
-    render_courses,
-    render_course_assignments,
-    grades_command,
-    reminders_command,
-    help_command,
-)
-from bot.datetime_utils import _format_due_with_relative
 
 logger = logging.getLogger(__name__)
+
+
+async def _require_canvas_token(query, action_text: str) -> str | None:
+    """Return Canvas token for callback user, or show a friendly error and return None."""
+
+    chat = query.message.chat if query.message else None
+    chat_id = getattr(chat, "id", None) if chat else None
+    if chat_id is None:
+        await query.edit_message_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return None
+
+    canvas_token = get_user_canvas_token(chat_id)
+    if not canvas_token:
+        await query.edit_message_text(
+            f"To {action_text}, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return None
+
+    return canvas_token
 
 
 async def main_menu_callback(
@@ -50,26 +77,11 @@ async def main_menu_callback(
         await help_command(update, context)
 
     elif data == "courses":
-        chat = query.message.chat if query.message else None
-        chat_id = getattr(chat, "id", None) if chat else None
-
-        if chat_id is None:
-            await query.edit_message_text(
-                "I couldn't identify your Telegram user. Please try again.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-
-        canvas_token = get_user_canvas_token(chat_id)
+        canvas_token = await _require_canvas_token(
+            query,
+            "load your Canvas courses",
+        )
         if not canvas_token:
-            await query.edit_message_text(
-                "To load your Canvas courses, please set your personal Canvas API token first.\n\n"
-                "Send it using:\n"
-                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
-                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard(),
-            )
             return
 
         await render_courses(query.message, canvas_token=canvas_token, edit=True)
@@ -122,25 +134,8 @@ async def main_menu_callback(
                     except ValueError:
                         page = 1
 
-            chat = query.message.chat if query.message else None
-            chat_id = getattr(chat, "id", None) if chat else None
-            if chat_id is None:
-                await query.edit_message_text(
-                    "I couldn't identify your Telegram user. Please try again.",
-                    reply_markup=main_menu_keyboard(),
-                )
-                return
-
-            canvas_token = get_user_canvas_token(chat_id)
+            canvas_token = await _require_canvas_token(query, "load assignments")
             if not canvas_token:
-                await query.edit_message_text(
-                    "To load assignments, please set your personal Canvas API token first.\n\n"
-                    "Send it using:\n"
-                    "*/settoken YOUR_CANVAS_TOKEN*\n\n"
-                    "You can create a token in Canvas under *Account → Settings → New Access Token*.",
-                    parse_mode="Markdown",
-                    reply_markup=main_menu_keyboard(),
-                )
                 return
 
             await render_course_assignments(
@@ -169,25 +164,8 @@ async def main_menu_callback(
         # course:{course_id}
         course_id = parts[1]
 
-        chat = query.message.chat if query.message else None
-        chat_id = getattr(chat, "id", None) if chat else None
-        if chat_id is None:
-            await query.edit_message_text(
-                "I couldn't identify your Telegram user. Please try again.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-
-        canvas_token = get_user_canvas_token(chat_id)
+        canvas_token = await _require_canvas_token(query, "view course details")
         if not canvas_token:
-            await query.edit_message_text(
-                "To view course details, please set your personal Canvas API token first.\n\n"
-                "Send it using:\n"
-                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
-                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard(),
-            )
             return
 
         dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
@@ -233,25 +211,8 @@ async def main_menu_callback(
             )
             return
 
-        chat = query.message.chat if query.message else None
-        chat_id = getattr(chat, "id", None) if chat else None
-        if chat_id is None:
-            await query.edit_message_text(
-                "I couldn't identify your Telegram user. Please try again.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-
-        canvas_token = get_user_canvas_token(chat_id)
+        canvas_token = await _require_canvas_token(query, "load assignments")
         if not canvas_token:
-            await query.edit_message_text(
-                "To load assignments, please set your personal Canvas API token first.\n\n"
-                "Send it using:\n"
-                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
-                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard(),
-            )
             return
 
         try:
@@ -284,7 +245,6 @@ async def main_menu_callback(
         name = selected.get("name") or f"Assignment {assignment_id}"
         points_possible = selected.get("points_possible")
         due_at = selected.get("due_at")
-        created_at = selected.get("created_at")
         allowed_attempts = selected.get("allowed_attempts")
         has_submitted = selected.get("has_submitted_submissions")
 
@@ -378,25 +338,11 @@ async def main_menu_callback(
             )
             return
 
-        chat = query.message.chat if query.message else None
-        chat_id = getattr(chat, "id", None) if chat else None
-        if chat_id is None:
-            await query.edit_message_text(
-                "I couldn't identify your Telegram user. Please try again.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-
-        canvas_token = get_user_canvas_token(chat_id)
+        canvas_token = await _require_canvas_token(
+            query,
+            "load assignment details",
+        )
         if not canvas_token:
-            await query.edit_message_text(
-                "To load assignment details, please set your personal Canvas API token first.\n\n"
-                "Send it using:\n"
-                "*/settoken YOUR_CANVAS_TOKEN*\n\n"
-                "You can create a token in Canvas under *Account → Settings → New Access Token*.",
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard(),
-            )
             return
 
         try:
