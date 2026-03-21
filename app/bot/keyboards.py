@@ -13,7 +13,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("📚 Courses", callback_data="courses"),
-            InlineKeyboardButton("📋 Assignments", callback_data="assignments"),
+            InlineKeyboardButton("📅 Calendar", callback_data="calendar"),
         ],
         [
             InlineKeyboardButton("📊 Grades", callback_data="grades"),

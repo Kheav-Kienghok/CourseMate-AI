@@ -6,6 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.commands import (
+    calendar_command,
     grades_command,
     help_command,
     reminders_command,
@@ -89,12 +90,7 @@ async def main_menu_callback(
         # User selected a concrete date without assignments:
         # cal:day:YYYY-MM-DD
         if action == "day" and len(parts) == 3:
-            selected_date = parts[2]
-            await query.edit_message_text(
-                f"📅 You selected *{selected_date}*.",
-                parse_mode="Markdown",
-                reply_markup=None,
-            )
+            # No assignments for this date; keep current view unchanged.
             return
 
         # User selected a date that has assignments:
@@ -198,7 +194,10 @@ async def main_menu_callback(
 
         # Unknown calendar action: fall through to generic handler below.
 
-    if data == "help":
+    if data == "calendar":
+        await calendar_command(update, context)
+
+    elif data == "help":
         await help_command(update, context)
 
     elif data == "assignments":
@@ -479,11 +478,6 @@ async def main_menu_callback(
 
         # Blank line before timestamps
         lines.append("")
-
-        # if created_at:
-        #     pretty_created = _format_canvas_datetime(created_at)
-        #     if pretty_created:
-        #         lines.append(f"🕒 Created at: {pretty_created}")
 
         if due_at:
             pretty_due = _format_due_with_relative(due_at)
