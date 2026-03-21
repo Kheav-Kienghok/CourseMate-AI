@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import calendar
+from datetime import date
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -252,3 +254,112 @@ def course_assignments_keyboard(
         )
 
     return InlineKeyboardMarkup(buttons)
+
+
+def calendar_keyboard(
+    year: int | None = None,
+    month: int | None = None,
+    assignments_by_date: dict[str, list[dict[str, Any]]] | None = None,
+) -> InlineKeyboardMarkup:
+    """Return an inline keyboard showing a monthly calendar grid.
+
+    Layout:
+    - Row 1: prev month, "Month YYYY" label, next month
+    - Row 2: weekday names (Mo..Su)
+    - Rows 3+: weeks with day numbers; empty cells are non-clickable
+
+    Visual markers:
+    - Today: 🔵
+    - Normal assignment day: 🟡
+    - Urgent assignment day: 🔴
+    - Combined (e.g. today + urgent): 🔵🔴
+    """
+
+    today = date.today()
+    year = year or today.year
+    month = month or today.month
+    assignments_by_date = assignments_by_date or {}
+
+    cal = calendar.Calendar(firstweekday=0)  # Monday start
+
+    # Header row with navigation
+    if month == 1:
+        prev_year, prev_month = year - 1, 12
+    else:
+        prev_year, prev_month = year, month - 1
+
+    if month == 12:
+        next_year, next_month = year + 1, 1
+    else:
+        next_year, next_month = year, month + 1
+
+    header_row = [
+        InlineKeyboardButton(
+            "<",
+            callback_data=f"cal:prev:{prev_year}-{prev_month:02d}",
+        ),
+        InlineKeyboardButton(
+            f"{calendar.month_name[month]} {year}",
+            callback_data="cal:ignore",
+        ),
+        InlineKeyboardButton(
+            ">",
+            callback_data=f"cal:next:{next_year}-{next_month:02d}",
+        ),
+    ]
+
+    # Weekday names row (Mo-Su)
+    weekday_names = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+    weekdays_row = [
+        InlineKeyboardButton(name, callback_data="cal:ignore") for name in weekday_names
+    ]
+
+    keyboard: list[list[InlineKeyboardButton]] = [header_row, weekdays_row]
+
+    def _build_day_button(day_number: int) -> InlineKeyboardButton:
+        day_date = date(year, month, day_number)
+        day_str = day_date.strftime("%Y-%m-%d")
+
+        is_today = day_date == today
+        day_assignments = assignments_by_date.get(day_str, [])
+        has_assignments = bool(day_assignments)
+        has_urgent = any(bool(a.get("urgent")) for a in day_assignments)
+
+        markers: list[str] = []
+        if is_today:
+            markers.append("🔵")
+        if has_urgent:
+            markers.append("🔴")
+        elif has_assignments:
+            markers.append("🟡")
+
+        marker_text = "".join(markers)
+        label = str(day_number)
+
+        if has_assignments and len(day_assignments) > 1:
+            # Show the number of assignments in parentheses, e.g. "21 (2)".
+            label = f"{label} ({len(day_assignments)})"
+
+        if marker_text:
+            label = f"{label}{marker_text}"
+
+        if has_assignments:
+            flag = "urgent" if has_urgent else "assignments"
+            callback_suffix = f"{day_str}:{flag}"
+        else:
+            callback_suffix = day_str
+
+        callback_data = f"cal:day:{callback_suffix}"
+        return InlineKeyboardButton(label, callback_data=callback_data)
+
+    # Weeks of the month
+    for week in cal.monthdayscalendar(year, month):
+        row: list[InlineKeyboardButton] = []
+        for day_number in week:
+            if day_number == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="cal:ignore"))
+            else:
+                row.append(_build_day_button(day_number))
+        keyboard.append(row)
+
+    return InlineKeyboardMarkup(keyboard)

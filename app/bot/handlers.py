@@ -10,6 +10,7 @@ from __future__ import annotations
 from bot.callbacks import main_menu_callback
 from bot.commands import (
     assignments_command,
+    calendar_command,
     courses_command,
     grades_command,
     help_command,
@@ -26,6 +27,7 @@ __all__ = [
     "help_command",
     "courses_command",
     "assignments_command",
+    "calendar_command",
     "grades_command",
     "reminders_command",
     "set_canvas_token_command",

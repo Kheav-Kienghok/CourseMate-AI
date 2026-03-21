@@ -14,9 +14,10 @@ from bot.commands import (
     render_month_assignments_overview,
 )
 from bot.datetime_utils import _format_due_with_relative
-from bot.keyboards import course_menu_keyboard, main_menu_keyboard
+from bot.keyboards import calendar_keyboard, course_menu_keyboard, main_menu_keyboard
 from canvas.canvas_client import (
     get_assignment_submission,
+    get_calendar_events,
     get_course_assignments,
     get_dashboard_cards,
     get_student_assignment,
@@ -74,6 +75,128 @@ async def main_menu_callback(
         getattr(user, "id", None),
         getattr(user, "username", None),
     )
+
+    # Calendar callbacks (date picker similar to telegram-calendar)
+    if data and data.startswith("cal:"):
+        parts = data.split(":")
+
+        action = parts[1] if len(parts) >= 2 else ""
+
+        # Ignore non-interactive cells (header/day-names/empty cells).
+        if action == "ignore":
+            return
+
+        # User selected a concrete date without assignments:
+        # cal:day:YYYY-MM-DD
+        if action == "day" and len(parts) == 3:
+            selected_date = parts[2]
+            await query.edit_message_text(
+                f"📅 You selected *{selected_date}*.",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+            return
+
+        # User selected a date that has assignments:
+        # cal:day:YYYY-MM-DD:assignments or cal:day:YYYY-MM-DD:urgent
+        if action == "day" and len(parts) >= 4:
+            selected_date = parts[2]
+            _flag = parts[3]
+
+            canvas_token = await _require_canvas_token(
+                query,
+                "view assignments for this date",
+            )
+            if not canvas_token:
+                return
+
+            # Build context codes from the user's active dashboard courses.
+            try:
+                dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to load courses for calendar callback: %s", exc)
+                await query.edit_message_text(
+                    f"Failed to load courses for calendar: {exc}",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            context_codes: list[str] = []
+            for course in dashboard_cards:
+                if course.get("enrollmentState") != "active":
+                    continue
+                course_id = course.get("id")
+                if course_id is not None:
+                    context_codes.append(f"course_{course_id}")
+
+            # Restrict the window to the specific calendar date.
+            start_date = f"{selected_date}T00:00:00.000Z"
+            end_date = f"{selected_date}T23:59:59.000Z"
+
+            try:
+                events = get_calendar_events(
+                    canvas_token=canvas_token,
+                    start_date=start_date,
+                    end_date=end_date,
+                    context_codes=context_codes,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Failed to load calendar events for %s: %s", selected_date, exc
+                )
+                await query.edit_message_text(
+                    f"Failed to load calendar events: {exc}",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            lines: list[str] = [
+                f"📅 *Assignments on {selected_date}*",
+                "",
+            ]
+
+            if not events:
+                lines.append("No assignments for this date.")
+            else:
+                for event in events:
+                    assignment_info = event.get("assignment") or {}
+                    title = (
+                        assignment_info.get("name")
+                        or event.get("title")
+                        or "Assignment"
+                    )
+                    course_name = (
+                        event.get("context_name")
+                        or assignment_info.get("course_id")
+                        or "Unknown course"
+                    )
+                    lines.append(f"• *{course_name}* — {title}")
+
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+            return
+
+        # Navigation between months: cal:prev:YYYY-MM or cal:next:YYYY-MM
+        if action in {"prev", "next"} and len(parts) == 3:
+            year_month = parts[2]
+            try:
+                year_str, month_str = year_month.split("-", maxsplit=1)
+                year = int(year_str)
+                month = int(month_str)
+            except Exception:  # noqa: BLE001
+                logger.warning("Malformed calendar nav callback data: %s", data)
+                return
+
+            # For prev we already encoded target year-month; same for next.
+            await query.edit_message_reply_markup(
+                reply_markup=calendar_keyboard(year=year, month=month)
+            )
+            return
+
+        # Unknown calendar action: fall through to generic handler below.
 
     if data == "help":
         await help_command(update, context)

@@ -52,6 +52,51 @@ def get_dashboard_cards(canvas_token: str | None) -> list[dict[str, Any]]:
     return courses
 
 
+def get_calendar_events(
+    canvas_token: str | None,
+    start_date: str,
+    end_date: str,
+    context_codes: list[str],
+) -> list[dict[str, Any]]:
+    """Fetch calendar events for the given window and contexts.
+
+    This is a thin wrapper around the Canvas
+    /v1/calendar_events endpoint. It expects ISO8601 strings for
+    ``start_date`` and ``end_date`` (e.g. ``2026-02-28T17:00:00.000Z``)
+    and a list of context codes like ``user_123`` or ``course_456``.
+    """
+
+    base_url = get_canvas_base_url()
+    if not base_url:
+        raise ValueError("HTTP_URL environment variable is not set")
+
+    if not canvas_token:
+        raise ValueError("Canvas API token is missing")
+
+    api_url = f"{base_url}/v1/calendar_events"
+    headers = {"Authorization": f"Bearer {canvas_token}"}
+
+    params: dict[str, Any] = {
+        "type": "assignment",
+        "per_page": 50,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+    # requests will encode list values for "context_codes[]" correctly.
+    if context_codes:
+        params["context_codes[]"] = context_codes
+
+    response = requests.get(api_url, headers=headers, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    if not isinstance(data, list):
+        raise TypeError("Expected list of calendar events from Canvas API")
+
+    return data
+
+
 def get_student_assignment(
     assignment_lid: str,
     submission_id: str,

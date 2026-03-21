@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import calendar as _calendar
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.keyboards import (
+    calendar_keyboard,
     course_assignments_keyboard,
     courses_keyboard,
     main_menu_keyboard,
     month_assignments_keyboard,
 )
-from canvas.canvas_client import get_course_assignments, get_dashboard_cards
+from canvas.canvas_client import (
+    get_calendar_events,
+    get_course_assignments,
+    get_dashboard_cards,
+)
 from services.user_store import get_user_canvas_token, set_user_canvas_token
 
 logger = logging.getLogger(__name__)
@@ -436,7 +442,7 @@ async def render_month_assignments_overview(
         lines.append("")
         lines.append(f"Next up: {badge} *{name}* — _{course_name}_")
         lines.append(f"{due_phrase}")
-        lines.append("Tip: Reserve 20–30 minutes to start this." )
+        lines.append("Tip: Reserve 20–30 minutes to start this.")
 
     # Grouped sections: Upcoming (todo), Submitted, Past Due
     def _render_section(title: str, items: list[dict], *, past: bool = False) -> None:
@@ -464,9 +470,7 @@ async def render_month_assignments_overview(
             badge = _priority_badge(due_dt)
             due_phrase = _relative_due_phrase(due_dt)
 
-            lines.append(
-                f"• {badge} *{name}* — _{course_name}_\n  {due_phrase}"
-            )
+            lines.append(f"• {badge} *{name}* — _{course_name}_\n  {due_phrase}")
 
     upcoming_section = [
         item
@@ -476,9 +480,7 @@ async def render_month_assignments_overview(
     submitted_section = [
         item for item in all_month_assignments if item["bucket"] == "submitted"
     ]
-    past_section = [
-        item for item in all_month_assignments if item["bucket"] == "past"
-    ]
+    past_section = [item for item in all_month_assignments if item["bucket"] == "past"]
 
     _render_section("Upcoming", upcoming_section, past=False)
     _render_section("Submitted", submitted_section, past=False)
@@ -565,10 +567,157 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🚀 */start* — Introduce the bot\n"
         "📖 */courses* — Show your courses\n"
         "📝 */assignments* — This month's assignment To-Do list\n"
+        "📅 */calendar* — Open date picker calendar\n"
         "📊 */grades* — Current grades\n"
         "⏰ */reminders* — Manage reminders\n"
         "❓ */help* — Show this message",
         parse_mode="Markdown",
+    )
+
+
+async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /calendar command.
+
+    Shows an inline monthly calendar keyboard where the user can pick a date.
+    """
+
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    user = update.effective_user
+
+    logger.info(
+        "Received /calendar from user_id=%s username=%s",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+    )
+
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        await message.reply_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    canvas_token = get_user_canvas_token(chat_id)
+
+    if not canvas_token:
+        await message.reply_text(
+            "To load your calendar assignments, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    # Determine the visible month (current month) and a slightly wider
+    # window to fetch calendar events around it.
+    now_utc = datetime.now(timezone.utc)
+    year = now_utc.year
+    month = now_utc.month
+
+    first_of_month = datetime(year, month, 1, tzinfo=timezone.utc)
+    last_day = _calendar.monthrange(year, month)[1]
+    last_of_month = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    start_dt = first_of_month - timedelta(days=7)
+    end_dt = last_of_month + timedelta(days=7)
+
+    def _to_canvas_iso(dt: datetime) -> str:
+        # Canvas expects an ISO8601 timestamp, typically with a 'Z' suffix.
+        return dt.isoformat().replace("+00:00", "Z")
+
+    # Build context codes from the user's active dashboard courses.
+    try:
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load courses for calendar: %s", exc)
+        await message.reply_text(
+            f"Failed to load courses for calendar: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    context_codes: list[str] = []
+    for course in dashboard_cards:
+        if course.get("enrollmentState") != "active":
+            continue
+        course_id = course.get("id")
+        if course_id is not None:
+            context_codes.append(f"course_{course_id}")
+
+    assignments_by_date: dict[str, list[dict[str, Any]]] = {}
+
+    try:
+        events = get_calendar_events(
+            canvas_token=canvas_token,
+            start_date=_to_canvas_iso(start_dt),
+            end_date=_to_canvas_iso(end_dt),
+            context_codes=context_codes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load calendar events: %s", exc)
+        await message.reply_text(
+            f"Failed to load calendar events: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    today_date = date.today()
+
+    for event in events:
+        # Canvas sends all-day events with all_day_date, timed events with
+        # start_at. We only need the calendar date portion (YYYY-MM-DD).
+        raw_date = event.get("all_day_date") or event.get("start_at")
+        if not raw_date:
+            continue
+
+        if "T" in raw_date:
+            date_str = raw_date.split("T", maxsplit=1)[0]
+        else:
+            date_str = raw_date
+
+        # Basic safety: skip events outside our month window.
+        try:
+            event_date = datetime.fromisoformat(date_str).date()
+        except Exception:  # noqa: BLE001
+            # Fallback: best-effort parse using simple slicing.
+            try:
+                event_date = date.fromisoformat(date_str)
+            except Exception:  # noqa: BLE001
+                continue
+
+        # Consider an assignment "urgent" if it's today or in the past.
+        urgent = event_date <= today_date
+
+        assignment_info = event.get("assignment") or {}
+        title = assignment_info.get("name") or event.get("title") or "Assignment"
+        course_name = (
+            event.get("context_name")
+            or assignment_info.get("course_id")
+            or "Unknown course"
+        )
+
+        assignments_by_date.setdefault(date_str, []).append(
+            {
+                "title": title,
+                "urgent": urgent,
+                "course_name": str(course_name),
+            }
+        )
+
+    await message.reply_text(
+        "📅 Choose a date from the calendar below:",
+        reply_markup=calendar_keyboard(
+            year=year,
+            month=month,
+            assignments_by_date=assignments_by_date,
+        ),
     )
 
 

@@ -12,6 +12,7 @@ from telegram.ext import (
 
 from bot.handlers import (
     assignments_command,
+    calendar_command,
     courses_command,
     error_handler,
     grades_command,
@@ -46,6 +47,7 @@ class CourseMateBot:
         self._application.add_handler(
             CommandHandler("assignments", assignments_command)
         )
+        self._application.add_handler(CommandHandler("calendar", calendar_command))
 
         self._application.add_handler(CommandHandler("grades", grades_command))
         self._application.add_handler(CommandHandler("reminders", reminders_command))
