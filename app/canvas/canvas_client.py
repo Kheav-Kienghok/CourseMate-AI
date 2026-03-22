@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import tempfile
 
 import requests
 
@@ -94,7 +95,84 @@ def get_calendar_events(
     if not isinstance(data, list):
         raise TypeError("Expected list of calendar events from Canvas API")
 
-    return data
+    the_events: list[dict[str, Any]] = []
+    for event in data:
+        assignment = event.get("assignment") or {}
+
+        # Canvas often stores the rich HTML description on the assignment
+        # object, not on the top-level calendar event.
+        description = event.get("description") or assignment.get("description")
+
+        the_events.append(
+            {
+                "id": event.get("id"),
+                "title": event.get("title"),
+                "description": description,
+                "has_submitted": assignment.get("has_submitted_submissions"),
+                "user_sumbited": assignment.get("user_submitted"),
+                "context_code": event.get("context_code"),
+                "context_name": event.get("context_name"),
+                "start_at": event.get("start_at"),
+                "end_at": event.get("end_at"),
+            }
+        )
+
+    return the_events
+
+
+def download_canvas_file(
+    canvas_token: str | None,
+    file_api_endpoint: str,
+) -> tuple[str, str, str | None]:
+    """Download a Canvas file given its API endpoint.
+
+    The *file_api_endpoint* is the value from Canvas's
+    ``data-api-endpoint`` attribute, for example:
+    ``https://aupp.instructure.com/api/v1/courses/4377/files/626681``.
+
+    Returns a tuple of ``(content_bytes, filename, mime_type)``.
+    """
+
+    if not canvas_token:
+        raise ValueError("Canvas API token is missing")
+
+    # First, fetch metadata for the file to discover a proper filename
+    # and the download URL.
+    headers = {"Authorization": f"Bearer {canvas_token}"}
+
+    meta_resp = requests.get(file_api_endpoint, headers=headers, timeout=10)
+    meta_resp.raise_for_status()
+    meta = meta_resp.json()
+
+    if not isinstance(meta, dict):
+        raise TypeError("Expected dict for Canvas file metadata")
+
+    filename = (
+        meta.get("filename")
+        or meta.get("display_name")
+        or f"canvas-file-{meta.get('id', 'download')}"
+    )
+
+    download_url = meta.get("url") or meta.get("download_url")
+    if not download_url:
+        # Fallback: most Canvas file endpoints also support /download.
+        download_url = f"{file_api_endpoint.rstrip('/')}/download"
+
+    file_resp = requests.get(download_url, headers=headers, timeout=30)
+    file_resp.raise_for_status()
+
+    content_type = file_resp.headers.get("Content-Type")
+
+    # Persist the file to a temporary location so callers can stream it
+    # to Telegram and then delete it.
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    try:
+        tmp.write(file_resp.content)
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    return tmp_path, str(filename), content_type
 
 
 def get_student_assignment(

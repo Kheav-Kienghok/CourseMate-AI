@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import calendar as _calendar
 import logging
+import os
+import re
+import html
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
-from telegram import Update
+from telegram import InputFile, Update
 from telegram.ext import ContextTypes
 
 from bot.keyboards import (
@@ -16,6 +19,7 @@ from bot.keyboards import (
     month_assignments_keyboard,
 )
 from canvas.canvas_client import (
+    download_canvas_file,
     get_calendar_events,
     get_course_assignments,
     get_dashboard_cards,
@@ -671,9 +675,10 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     today_date = date.today()
 
     for event in events:
-        # Canvas sends all-day events with all_day_date, timed events with
-        # start_at. We only need the calendar date portion (YYYY-MM-DD).
-        raw_date = event.get("all_day_date") or event.get("start_at")
+        # get_calendar_events returns a simplified event dict with
+        # a normalized "start_at" timestamp. We only need the
+        # calendar date portion (YYYY-MM-DD).
+        raw_date = event.get("start_at")
         if not raw_date:
             continue
 
@@ -695,17 +700,15 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Consider an assignment "urgent" if it's today or in the past.
         urgent = event_date <= today_date
 
-        assignment_info = event.get("assignment") or {}
-        title = assignment_info.get("name") or event.get("title") or "Assignment"
-        course_name = (
-            event.get("context_name")
-            or assignment_info.get("course_id")
-            or "Unknown course"
-        )
+        title = event.get("title") or "Assignment"
+        description = event.get("description") or "Description not available"
+
+        course_name = event.get("context_name") or "Unknown course"
 
         assignments_by_date.setdefault(date_str, []).append(
             {
                 "title": title,
+                "description": description,
                 "urgent": urgent,
                 "course_name": str(course_name),
             }
@@ -821,6 +824,173 @@ async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await message.reply_text(
         "📊 Grade summary is not implemented yet.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /download command.
+
+    Extracts Canvas file API links (data-api-endpoint) from assignment
+    descriptions in the same calendar window used by /calendar and
+    sends them to the user.
+    """
+
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    user = update.effective_user
+
+    logger.info(
+        "Received /download from user_id=%s username=%s",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+    )
+
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        await message.reply_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    canvas_token = get_user_canvas_token(chat_id)
+
+    if not canvas_token:
+        await message.reply_text(
+            "To fetch assignment downloads, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    # Use the same time window as /calendar (current month ± 7 days).
+    now_utc = datetime.now(timezone.utc)
+    year = now_utc.year
+    month = now_utc.month
+
+    first_of_month = datetime(year, month, 1, tzinfo=timezone.utc)
+    last_day = _calendar.monthrange(year, month)[1]
+    last_of_month = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    start_dt = first_of_month - timedelta(days=7)
+    end_dt = last_of_month + timedelta(days=7)
+
+    def _to_canvas_iso(dt: datetime) -> str:
+        return dt.isoformat().replace("+00:00", "Z")
+
+    # Build context codes from the user's active dashboard courses.
+    try:
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load courses for download list: %s", exc)
+        await message.reply_text(
+            f"Failed to load courses for downloads: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    context_codes: list[str] = []
+    for course in dashboard_cards:
+        if course.get("enrollmentState") != "active":
+            continue
+        course_id = course.get("id")
+        if course_id is not None:
+            context_codes.append(f"course_{course_id}")
+
+    try:
+        events = get_calendar_events(
+            canvas_token=canvas_token,
+            start_date=_to_canvas_iso(start_dt),
+            end_date=_to_canvas_iso(end_dt),
+            context_codes=context_codes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load calendar events for downloads: %s", exc)
+        await message.reply_text(
+            f"Failed to load calendar events: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    lines: list[str] = [
+        "📥 *Download links from your assignments*",
+        "",
+    ]
+
+    link_count = 0
+    pattern = re.compile(r'data-api-endpoint="([^"]+)"')
+
+    for event in events:
+        raw_desc_html = event.get("description") or ""
+        if not raw_desc_html:
+            continue
+
+        # Extract Canvas file API URLs from the HTML description
+        links = pattern.findall(raw_desc_html)
+        if not links:
+            continue
+
+        # Clean description text (strip tags, decode HTML entities, normalize spaces)
+        clean_desc = re.sub(r"<[^>]+>", "", raw_desc_html)
+        clean_desc = html.unescape(clean_desc)
+        clean_desc = re.sub(r"\s+", " ", clean_desc).strip()
+
+        course_name = event.get("context_name") or "Unknown course"
+        title = event.get("title") or "Assignment"
+
+        # Block-style summary per assignment
+        lines.append(f"• {course_name}")
+        lines.append(f"  Title: {title}")
+        if clean_desc:
+            lines.append(f"  Description: {clean_desc}")
+
+        # Download and send each linked file to the user
+        for api_endpoint in links:
+            try:
+                tmp_path, filename, _mime = download_canvas_file(
+                    canvas_token, api_endpoint
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to download Canvas file %s: %s", api_endpoint, exc)
+                lines.append(f"  File (failed): {api_endpoint} — {exc}")
+                continue
+
+            link_count += 1
+            caption = f"{course_name}\nTitle: {title}"
+
+            try:
+                with open(tmp_path, "rb") as fh:
+                    await message.reply_document(
+                        document=InputFile(fh, filename=filename),
+                        caption=caption,
+                    )
+                lines.append(f"  File: {filename}")
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    logger.warning("Failed to remove temp file %s", tmp_path)
+
+        lines.append("")
+
+    if link_count == 0:
+        await message.reply_text(
+            "No downloadable Canvas files were found in your current calendar assignments.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    await message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
         reply_markup=main_menu_keyboard(),
     )
 

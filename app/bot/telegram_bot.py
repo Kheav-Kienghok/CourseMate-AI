@@ -14,6 +14,7 @@ from bot.handlers import (
     assignments_command,
     calendar_command,
     courses_command,
+    download_command,
     error_handler,
     grades_command,
     help_command,
@@ -48,6 +49,7 @@ class CourseMateBot:
             CommandHandler("assignments", assignments_command)
         )
         self._application.add_handler(CommandHandler("calendar", calendar_command))
+        self._application.add_handler(CommandHandler("download", download_command))
 
         self._application.add_handler(CommandHandler("grades", grades_command))
         self._application.add_handler(CommandHandler("reminders", reminders_command))

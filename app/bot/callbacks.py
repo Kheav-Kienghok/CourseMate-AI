@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import html
 import logging
+import os
+import tempfile
+import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import ContextTypes
 
 from bot.commands import (
@@ -17,6 +21,7 @@ from bot.commands import (
 from bot.datetime_utils import _format_due_with_relative
 from bot.keyboards import calendar_keyboard, course_menu_keyboard, main_menu_keyboard
 from canvas.canvas_client import (
+    download_canvas_file,
     get_assignment_submission,
     get_calendar_events,
     get_course_assignments,
@@ -151,22 +156,69 @@ async def main_menu_callback(
                 "",
             ]
 
+            # Calendar after click
+
             if not events:
                 lines.append("No assignments for this date.")
             else:
+                file_pattern = re.compile(r'data-api-endpoint="([^\"]+)"')
+
                 for event in events:
-                    assignment_info = event.get("assignment") or {}
-                    title = (
-                        assignment_info.get("name")
-                        or event.get("title")
-                        or "Assignment"
-                    )
-                    course_name = (
-                        event.get("context_name")
-                        or assignment_info.get("course_id")
-                        or "Unknown course"
-                    )
-                    lines.append(f"• *{course_name}* — {title}")
+                    course_name = event.get("context_name") or "Unknown course"
+                    title = event.get("title") or "Assignment"
+
+                    raw_desc = event.get("description") or ""
+                    clean_desc = ""
+                    api_endpoints: list[str] = []
+
+                    if raw_desc:
+                        # Extract Canvas file API URLs from description HTML
+                        api_endpoints = file_pattern.findall(raw_desc)
+
+                        # Clean description for display
+                        clean_desc = re.sub(r"<[^>]+>", "", raw_desc)
+                        clean_desc = html.unescape(clean_desc)
+                        clean_desc = re.sub(r"\s+", " ", clean_desc).strip()
+
+                    # Nicely formatted block per assignment
+                    lines.append(f"• *{course_name}*")
+                    lines.append(f"  *Title*: {title}")
+                    if clean_desc:
+                        lines.append(f"  *Description*: {clean_desc}")
+                    lines.append("")
+
+                    # If there are Canvas file links in the description,
+                    # download and send those files directly to the user.
+                    for api_endpoint in api_endpoints:
+                        try:
+                            tmp_path, filename, _mime = download_canvas_file(
+                                canvas_token, api_endpoint
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error(
+                                "Failed to download Canvas file %s: %s",
+                                api_endpoint,
+                                exc,
+                            )
+                            continue
+
+                        caption = f"{course_name}\nTitle: {title}"
+
+                        try:
+                            msg = update.effective_message
+                            if msg is not None:
+                                with open(tmp_path, "rb") as fh:
+                                    await msg.reply_document(
+                                        document=InputFile(fh, filename=filename),
+                                        caption=caption,
+                                    )
+                        finally:
+                            try:
+                                os.remove(tmp_path)
+                            except OSError:
+                                logger.warning(
+                                    "Failed to remove temp file %s", tmp_path
+                                )
 
             await query.edit_message_text(
                 "\n".join(lines),
