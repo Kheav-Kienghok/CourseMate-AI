@@ -16,11 +16,6 @@ def get_dashboard_cards(canvas_token: str | None) -> list[dict[str, Any]]:
     """
 
     base_url = get_canvas_base_url()
-    if not base_url:
-        raise ValueError("HTTP_URL environment variable is not set")
-
-    if not canvas_token:
-        raise ValueError("Canvas API token is missing")
 
     courses: list[dict[str, Any]] = []
 
@@ -33,18 +28,19 @@ def get_dashboard_cards(canvas_token: str | None) -> list[dict[str, Any]]:
 
     for course in data:
 
-        courseName = course.get("shortName").split(" - ")
+        course_name = course.get("shortName").split(" - ")
 
         course_info = {
             "id": course.get("id"),
-            "shortName": courseName[1],
+            "shortName": course_name[1],
             "originalName": course.get("originalName"),
             "courseCode": course.get("courseCode"),
-            "section": courseName[0].split(" ")[-1],
+            "section": course_name[0].split(" ")[-1],
             "term": course.get("term"),
             "enrollmentState": course.get("enrollmentState"),
             "links": [course.get("links", {})],
         }
+
         courses.append(course_info)
 
     if not isinstance(data, list):
@@ -68,11 +64,6 @@ def get_calendar_events(
     """
 
     base_url = get_canvas_base_url()
-    if not base_url:
-        raise ValueError("HTTP_URL environment variable is not set")
-
-    if not canvas_token:
-        raise ValueError("Canvas API token is missing")
 
     api_url = f"{base_url}/v1/calendar_events"
     headers = {"Authorization": f"Bearer {canvas_token}"}
@@ -180,12 +171,8 @@ def get_student_assignment(
     submission_id: str,
     canvas_token: str | None,
 ) -> dict[str, Any]:
-    base_url = get_canvas_base_url()
-    if not base_url:
-        raise ValueError("HTTP_URL environment variable is not set")
 
-    if not canvas_token:
-        raise ValueError("Canvas API token is missing")
+    base_url = get_canvas_base_url()
 
     api_url = f"{base_url}/graphql"
     headers = {
@@ -244,11 +231,6 @@ def get_course_assignments(
     """
 
     base_url = get_canvas_base_url()
-    if not base_url:
-        raise ValueError("HTTP_URL environment variable is not set")
-
-    if not canvas_token:
-        raise ValueError("Canvas API token is missing")
 
     api_url = f"{base_url}/v1/courses/{course_id}/assignment_groups"
     headers = {"Authorization": f"Bearer {canvas_token}"}
@@ -307,11 +289,6 @@ def get_assignment_submission(
     """
 
     base_url = get_canvas_base_url()
-    if not base_url:
-        raise ValueError("HTTP_URL environment variable is not set")
-
-    if not canvas_token:
-        raise ValueError("Canvas API token is missing")
 
     api_url = (
         f"{base_url}/v1/courses/{course_id}/assignments/"

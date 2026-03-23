@@ -62,24 +62,20 @@ async def _require_canvas_token(query, action_text: str) -> str | None:
     return canvas_token
 
 
-async def main_menu_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle inline keyboard callbacks."""
+def _is_duplicate_click(
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    data: str | None,
+) -> bool:
+    """Return True if this callback is a rapid duplicate from the same user.
 
-    query = update.callback_query
-    if not query:
-        return
+    Uses a short time window to ignore repeated taps on slow connections.
+    """
 
-    user = query.from_user
-    data = query.data
+    # context.user_data is a persistent dict managed by PTB; mutate it
+    # in-place rather than assigning a new value.
+    user_data = context.user_data or {}
 
-    # Simple dedupe for repeated taps on slow connections:
-    # if the same user sends the same callback data within a short time
-    # window, treat it as already in progress and ignore duplicates.
-    user_data = context.user_data
-    if user_data is None:
-        user_data = {}
     last_callbacks = user_data.setdefault("_cm_last_callbacks", {})
 
     key_parts: list[str] = []
@@ -91,22 +87,124 @@ async def main_menu_callback(
     now = time.monotonic()
     last_ts = last_callbacks.get(key)
     if isinstance(last_ts, (int, float)) and now - float(last_ts) < 10.0:
+        return True
+
+    last_callbacks[key] = now
+    return False
+
+
+def _build_assignment_detail_text(
+    *,
+    name: str,
+    points_possible,
+    due_at,
+    score,
+    allowed_attempts=None,
+    has_submitted=None,
+    ensure_details_line: bool = False,
+) -> str:
+    """Build a Markdown-formatted detail block for an assignment.
+
+    Shared by multiple callbacks that display assignment details.
+    """
+
+    lines: list[str] = [
+        f"📝 *{name}*",
+        "------------------------------------------------",
+        "",
+    ]
+
+    if points_possible is not None:
+        lines.append(f"🏷 Points possible: *{points_possible}*")
+
+    if score is not None:
+        if points_possible is not None:
+            lines.append(f"📊 Score: *{score}* / *{points_possible}*")
+        else:
+            lines.append(f"📊 Score: *{score}*")
+
+    if allowed_attempts is not None:
+        if allowed_attempts == -1:
+            attempts_text = "Unlimited attempts"
+        else:
+            attempts_text = str(allowed_attempts)
+        lines.append(f"🔁 Allowed attempts: *{attempts_text}*")
+
+    if has_submitted is not None:
+        if has_submitted:
+            lines.append("📌 You have submitted this assignment.")
+        else:
+            lines.append("📌 You have not submitted this assignment yet.")
+
+    # Blank line before timestamps
+    lines.append("")
+
+    if due_at:
+        pretty_due = _format_due_with_relative(due_at)
+        if pretty_due:
+            lines.append(f"📅 Due: {pretty_due}")
+
+    if ensure_details_line and len(lines) <= 3:
+        lines.append("No additional details available.")
+
+    return "\n".join(lines)
+
+
+async def main_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Entry point for all inline keyboard callbacks (router)."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data
+    user = query.from_user
+
+    if _is_duplicate_click(context, user, data):
         await query.answer(
             "Still processing your previous request, please wait…",
             show_alert=False,
         )
         return
 
-    last_callbacks[key] = now
-
     await query.answer()
 
-    logger.info(
-        "Received callback '%s' from user_id=%s username=%s",
-        data,
-        getattr(user, "id", None),
-        getattr(user, "username", None),
-    )
+    logger.info("Callback '%s' from user_id=%s", data, getattr(user, "id", None))
+
+    # ROUTER
+    if not data:
+        return await handle_unknown(update)
+
+    if data.startswith("cal:"):
+        return await handle_calendar_callback(update, context)
+
+    if data.startswith("course-assignment:"):
+        return await handle_course_assignment_callback(update, context)
+
+    if data.startswith("assignment:"):
+        return await handle_assignment_callback(update, context)
+
+    if data.startswith("course:"):
+        return await handle_course_callback(update, context)
+
+    if data.startswith("assignments:"):
+        return await handle_assignments_callback(update, context)
+
+    return await handle_general_callback(update, context)
+
+
+async def handle_calendar_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle calendar-related callback data starting with "cal:"."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
 
     # Calendar callbacks (date picker similar to telegram-calendar)
     if data and data.startswith("cal:"):
@@ -272,53 +370,21 @@ async def main_menu_callback(
             )
             return
 
-        # Unknown calendar action: fall through to generic handler below.
+        # Unknown calendar action: nothing more to do here.
 
-    if data == "calendar":
-        await calendar_command(update, context)
 
-    elif data == "help":
-        await help_command(update, context)
+async def handle_assignments_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle callbacks starting with "assignments:"."""
 
-    elif data == "assignments":
-        canvas_token = await _require_canvas_token(
-            query,
-            "view your assignments",
-        )
-        if not canvas_token:
-            return
+    query = update.callback_query
+    if not query:
+        return
 
-        await render_month_assignments_overview(
-            query.message,
-            canvas_token=canvas_token,
-            filter_mode="todo",
-            edit=True,
-            compact=True,
-        )
+    data = query.data or ""
 
-    elif data == "courses":
-        canvas_token = await _require_canvas_token(
-            query,
-            "load your Canvas courses",
-        )
-        if not canvas_token:
-            return
-
-        await render_courses(query.message, canvas_token=canvas_token, edit=True)
-
-    elif data == "grades":
-        await grades_command(update, context)
-
-    elif data == "reminders":
-        await reminders_command(update, context)
-
-    elif data == "menu":
-        await query.edit_message_text(
-            "Main menu:",
-            reply_markup=main_menu_keyboard(),
-        )
-
-    elif data and data.startswith("assignments:this_month:"):
+    if data and data.startswith("assignments:this_month:"):
         parts = data.split(":")
         view_mode = parts[2] if len(parts) >= 3 else "compact"
 
@@ -359,7 +425,19 @@ async def main_menu_callback(
         else:
             await query.answer("Action not recognized.")
 
-    elif data and data.startswith("course:"):
+
+async def handle_course_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle callbacks starting with "course:" (course navigation)."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+
+    if data and data.startswith("course:"):
 
         parts = data.split(":")
 
@@ -459,7 +537,19 @@ async def main_menu_callback(
             parse_mode="Markdown",
         )
 
-    elif data and data.startswith("course-assignment:"):
+
+async def handle_course_assignment_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle callbacks starting with "course-assignment:"."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+
+    if data and data.startswith("course-assignment:"):
         try:
             _, course_id_str, assignment_id_str = data.split(":", maxsplit=2)
             course_id = int(course_id_str)
@@ -526,45 +616,14 @@ async def main_menu_callback(
                 exc,
             )
 
-        lines: list[str] = [
-            f"📝 *{name}*",
-            "------------------------------------------------",
-            "",
-        ]
-
-        if points_possible is not None:
-            lines.append(f"🏷 Points possible: *{points_possible}*")
-
-        if submission_score is not None:
-            if points_possible is not None:
-                lines.append(
-                    f"📊 Score: *{submission_score}* / *{points_possible}*",
-                )
-            else:
-                lines.append(f"📊 Score: *{submission_score}*")
-
-        if allowed_attempts is not None:
-            if allowed_attempts == -1:
-                attempts_text = "Unlimited attempts"
-            else:
-                attempts_text = str(allowed_attempts)
-            lines.append(f"🔁 Allowed attempts: *{attempts_text}*")
-
-        if has_submitted is not None:
-            if has_submitted:
-                lines.append("📌 You have submitted this assignment.")
-            else:
-                lines.append("📌 You have not submitted this assignment yet.")
-
-        # Blank line before timestamps
-        lines.append("")
-
-        if due_at:
-            pretty_due = _format_due_with_relative(due_at)
-            if pretty_due:
-                lines.append(f"📅 Due: {pretty_due}")
-
-        text = "\n".join(lines)
+        text = _build_assignment_detail_text(
+            name=name,
+            points_possible=points_possible,
+            due_at=due_at,
+            score=submission_score,
+            allowed_attempts=allowed_attempts,
+            has_submitted=has_submitted,
+        )
 
         back_keyboard = InlineKeyboardMarkup(
             [
@@ -583,7 +642,19 @@ async def main_menu_callback(
             parse_mode="Markdown",
         )
 
-    elif data and data.startswith("assignment:"):
+
+async def handle_assignment_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle callbacks starting with "assignment:" (GraphQL details)."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+
+    if data and data.startswith("assignment:"):
         try:
             _, assignment_lid, submission_id = data.split(":", maxsplit=2)
         except ValueError:
@@ -623,33 +694,13 @@ async def main_menu_callback(
 
         score = submission.get("score")
 
-        lines: list[str] = [
-            f"📝 *{name}*",
-            "------------------------------------------------",
-            "",
-        ]
-
-        if points_possible is not None:
-            lines.append(f"🏷 Points possible: *{points_possible}*")
-
-        if score is not None:
-            if points_possible:
-                lines.append(f"📊 Score: *{score}* / *{points_possible}*")
-            else:
-                lines.append(f"📊 Score: *{score}*")
-
-        # Blank line before timestamps
-        lines.append("")
-
-        if due_at:
-            pretty_due = _format_due_with_relative(due_at)
-            if pretty_due:
-                lines.append(f"📅 Due: {pretty_due}")
-
-        if len(lines) <= 3:
-            lines.append("No additional details available.")
-
-        text = "\n".join(lines)
+        text = _build_assignment_detail_text(
+            name=name,
+            points_possible=points_possible,
+            due_at=due_at,
+            score=score,
+            ensure_details_line=True,
+        )
 
         back_keyboard = InlineKeyboardMarkup(
             [
@@ -667,12 +718,83 @@ async def main_menu_callback(
             parse_mode="Markdown",
         )
 
-    else:
-        logger.warning("Unknown callback data: %s", data)
 
-        message = update.effective_message
-        if message:
-            await message.reply_text(
-                "Unknown action.",
-                reply_markup=main_menu_keyboard(),
-            )
+async def handle_general_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle non-prefixed callbacks like "calendar", "help", etc."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+
+    if data == "calendar":
+        await calendar_command(update, context)
+        return
+
+    if data == "help":
+        await help_command(update, context)
+        return
+
+    if data == "assignments":
+        canvas_token = await _require_canvas_token(
+            query,
+            "view your assignments",
+        )
+        if not canvas_token:
+            return
+
+        await render_month_assignments_overview(
+            query.message,
+            canvas_token=canvas_token,
+            filter_mode="todo",
+            edit=True,
+            compact=True,
+        )
+        return
+
+    if data == "courses":
+        canvas_token = await _require_canvas_token(
+            query,
+            "load your Canvas courses",
+        )
+        if not canvas_token:
+            return
+
+        await render_courses(query.message, canvas_token=canvas_token, edit=True)
+        return
+
+    if data == "grades":
+        await grades_command(update, context)
+        return
+
+    if data == "reminders":
+        await reminders_command(update, context)
+        return
+
+    if data == "menu":
+        await query.edit_message_text(
+            "Main menu:",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    await handle_unknown(update)
+
+
+async def handle_unknown(update: Update) -> None:
+    """Fallback when callback data cannot be understood."""
+
+    query = update.callback_query
+    data = query.data if query else None
+
+    logger.warning("Unknown callback data: %s", data)
+
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            "Unknown action.",
+            reply_markup=main_menu_keyboard(),
+        )

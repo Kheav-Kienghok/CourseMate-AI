@@ -51,14 +51,3 @@ def generate_and_store_secret() -> str:
         f.write(f"COURSEMATE_ENCRYPTION_SECRET={secret}\n")
 
     return secret
-
-
-def main() -> None:
-    secret = generate_and_store_secret()
-    print("COURSEMATE_ENCRYPTION_SECRET is set to:")
-    print(secret)
-    print("\nIt has been stored in your project .env file (if it was missing).")
-
-
-if __name__ == "__main__":
-    main()

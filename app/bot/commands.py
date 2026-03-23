@@ -34,6 +34,48 @@ logger = logging.getLogger(__name__)
 ASSIGNMENTS_PAGE_SIZE = 5
 
 
+def _month_window(now_utc: datetime) -> tuple[int, int, datetime, datetime]:
+    """Return (year, month, start_dt, end_dt) for the current month ± 7 days."""
+
+    year = now_utc.year
+    month = now_utc.month
+
+    first_of_month = datetime(year, month, 1, tzinfo=timezone.utc)
+    last_day = _calendar.monthrange(year, month)[1]
+    last_of_month = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    start_dt = first_of_month - timedelta(days=7)
+    end_dt = last_of_month + timedelta(days=7)
+
+    return year, month, start_dt, end_dt
+
+
+def _to_canvas_iso(dt: datetime) -> str:
+    """Return an ISO8601 timestamp string suitable for Canvas API."""
+
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+async def _get_chat_id_or_error(update: Update) -> int | None:
+    """Return chat_id for the update, or reply with an error and return None."""
+
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return None
+
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        await message.reply_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return None
+
+    return chat_id
+
+
 # -----------------------------------------------------------
 # Shared renderers
 # -----------------------------------------------------------
@@ -256,7 +298,7 @@ async def render_course_assignments(
     else:
         label = "Assignments"
 
-    text = f"📝 *{label} for* _{course_label}_ " f"(Page {page}/{total_pages}):"
+    text = f"📝 *{label} for* _{course_label}_ (Page {page}/{total_pages}):"
 
     if edit:
         await message.edit_text(
@@ -587,8 +629,7 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """
 
     message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
+    if not message:
         return
 
     user = update.effective_user
@@ -599,12 +640,8 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         getattr(user, "username", None),
     )
 
-    chat_id = getattr(chat, "id", None)
+    chat_id = await _get_chat_id_or_error(update)
     if chat_id is None:
-        await message.reply_text(
-            "I couldn't identify your Telegram user. Please try again.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
     canvas_token = get_user_canvas_token(chat_id)
@@ -623,19 +660,7 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # Determine the visible month (current month) and a slightly wider
     # window to fetch calendar events around it.
     now_utc = datetime.now(timezone.utc)
-    year = now_utc.year
-    month = now_utc.month
-
-    first_of_month = datetime(year, month, 1, tzinfo=timezone.utc)
-    last_day = _calendar.monthrange(year, month)[1]
-    last_of_month = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
-
-    start_dt = first_of_month - timedelta(days=7)
-    end_dt = last_of_month + timedelta(days=7)
-
-    def _to_canvas_iso(dt: datetime) -> str:
-        # Canvas expects an ISO8601 timestamp, typically with a 'Z' suffix.
-        return dt.isoformat().replace("+00:00", "Z")
+    year, month, start_dt, end_dt = _month_window(now_utc)
 
     # Build context codes from the user's active dashboard courses.
     try:
@@ -698,8 +723,13 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             except Exception:  # noqa: BLE001
                 continue
 
-        # Consider an assignment "urgent" if it's today or in the past.
-        urgent = event_date <= today_date
+        # Determine status based on due date vs today and submission state.
+        has_submitted = bool(event.get("has_submitted"))
+
+        if event_date <= today_date:
+            status = "past_submitted" if has_submitted else "past_unsubmitted"
+        else:
+            status = "upcoming"
 
         title = event.get("title") or "Assignment"
         description = event.get("description") or "Description not available"
@@ -710,13 +740,24 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             {
                 "title": title,
                 "description": description,
-                "urgent": urgent,
+                "status": status,
+                "has_submitted": has_submitted,
                 "course_name": str(course_name),
             }
         )
 
-    await message.reply_text(
+    legend_lines = [
         "📅 Choose a date from the calendar below:",
+        "",
+        "Legend:",
+        "🔵 Today",
+        "🟡 Upcoming assignments",
+        "🟢 Past assignments (submitted)",
+        "🔴 Past assignments (not submitted)",
+    ]
+
+    await message.reply_text(
+        "\n".join(legend_lines),
         reply_markup=calendar_keyboard(
             year=year,
             month=month,
@@ -729,8 +770,7 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle /courses command."""
 
     message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
+    if not message:
         return
 
     user = update.effective_user
@@ -741,12 +781,8 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         getattr(user, "username", None),
     )
 
-    chat_id = getattr(chat, "id", None)
+    chat_id = await _get_chat_id_or_error(update)
     if chat_id is None:
-        await message.reply_text(
-            "I couldn't identify your Telegram user. Please try again.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
     canvas_token = get_user_canvas_token(chat_id)
@@ -774,8 +810,7 @@ async def assignments_command(
     """
 
     message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
+    if not message:
         return
 
     user = update.effective_user
@@ -786,12 +821,8 @@ async def assignments_command(
         getattr(user, "username", None),
     )
 
-    chat_id = getattr(chat, "id", None)
+    chat_id = await _get_chat_id_or_error(update)
     if chat_id is None:
-        await message.reply_text(
-            "I couldn't identify your Telegram user. Please try again.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
     canvas_token = get_user_canvas_token(chat_id)
@@ -838,8 +869,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """
 
     message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
+    if not message:
         return
 
     user = update.effective_user
@@ -850,12 +880,8 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         getattr(user, "username", None),
     )
 
-    chat_id = getattr(chat, "id", None)
+    chat_id = await _get_chat_id_or_error(update)
     if chat_id is None:
-        await message.reply_text(
-            "I couldn't identify your Telegram user. Please try again.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
     canvas_token = get_user_canvas_token(chat_id)
@@ -873,18 +899,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Use the same time window as /calendar (current month ± 7 days).
     now_utc = datetime.now(timezone.utc)
-    year = now_utc.year
-    month = now_utc.month
-
-    first_of_month = datetime(year, month, 1, tzinfo=timezone.utc)
-    last_day = _calendar.monthrange(year, month)[1]
-    last_of_month = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
-
-    start_dt = first_of_month - timedelta(days=7)
-    end_dt = last_of_month + timedelta(days=7)
-
-    def _to_canvas_iso(dt: datetime) -> str:
-        return dt.isoformat().replace("+00:00", "Z")
+    _year, _month, start_dt, end_dt = _month_window(now_utc)
 
     # Build context codes from the user's active dashboard courses.
     try:
@@ -1022,23 +1037,19 @@ async def set_canvas_token_command(
 
     message = update.effective_message
     user = update.effective_user
-    chat = update.effective_chat
-
-    if not message or not user or not chat:
+    if not message or not user:
         return
 
-    chat_id = getattr(chat, "id", None)
+    chat_id = await _get_chat_id_or_error(update)
     username = getattr(user, "username", None)
     first_name = getattr(user, "first_name", None)
     last_name = getattr(user, "last_name", None)
 
     if chat_id is None:
-        await message.reply_text(
-            "I couldn't identify your Telegram user. Please try again.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
+    chat = update.effective_chat
+    assert chat is not None
     if not context.args:
         await message.reply_text(
             "Please send your Canvas API token like this:\n\n"

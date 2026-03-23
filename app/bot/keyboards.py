@@ -270,9 +270,10 @@ def calendar_keyboard(
 
     Visual markers:
     - Today: 🔵
-    - Normal assignment day: 🟡
-    - Urgent assignment day: 🔴
-    - Combined (e.g. today + urgent): 🔵🔴
+    - Upcoming assignment day: 🟡
+    - Past assignment day (submitted): 🟢
+    - Past assignment day (not submitted): 🔴
+    - Combined (e.g. today + past): 🔵🔴 or 🔵🟢
     """
 
     today = date.today()
@@ -323,14 +324,20 @@ def calendar_keyboard(
         is_today = day_date == today
         day_assignments = assignments_by_date.get(day_str, [])
         has_assignments = bool(day_assignments)
-        has_urgent = any(bool(a.get("urgent")) for a in day_assignments)
+
+        statuses = {a.get("status") for a in day_assignments}
+        has_past_unsubmitted = "past_unsubmitted" in statuses
+        has_past_submitted = "past_submitted" in statuses
+        has_upcoming = "upcoming" in statuses
 
         markers: list[str] = []
         if is_today:
             markers.append("🔵")
-        if has_urgent:
+        if has_past_unsubmitted:
             markers.append("🔴")
-        elif has_assignments:
+        elif has_past_submitted:
+            markers.append("🟢")
+        elif has_upcoming:
             markers.append("🟡")
 
         marker_text = "".join(markers)
@@ -344,7 +351,8 @@ def calendar_keyboard(
             label = f"{label}{marker_text}"
 
         if has_assignments:
-            flag = "urgent" if has_urgent else "assignments"
+            # The callback flag is currently informational only.
+            flag = "assignments"
             callback_suffix = f"{day_str}:{flag}"
         else:
             callback_suffix = day_str
