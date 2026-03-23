@@ -1,231 +1,229 @@
 # Telegram–Canvas Integration Overview
 
-## 1. Overview
+This document explains how the Telegram bot (UI + handlers) integrates with Canvas (REST + GraphQL), and how the user token and data flow through the system.
 
-This document describes how the Telegram bot interacts with the Canvas API, including:
+For function-level documentation:
 
-- User-facing commands and callbacks.
-- The HTTP requests sent to Canvas and how responses are used.
-
-For detailed, function-by-function input/output documentation, see:
-
-- Telegram bot API: `docs/telegram-bot-api.md`
-- Canvas client API: `docs/canvas-client-api.md`
+- `docs/telegram-bot-api.md`
+- `docs/canvas-client-api.md`
 
 ---
 
-## 2. High-Level Architecture
+## 1) Components
 
-### 2.1 Components
+### Telegram bot (`app/bot/*`)
 
-- **Telegram Bot** (in `app/bot/`)
-  - Handles commands (e.g. `/start`, `/help`, `/courses`, `/assignments`).
-  - Handles inline keyboard callbacks for navigation and details.
-  - Formats all messages and keyboards shown to the user.
+Responsibilities:
 
-- **Canvas Client** (in `app/canvas/canvas_client.py`)
-  - Wraps calls to the Canvas REST and GraphQL APIs.
-  - Exposes helper functions such as `get_dashboard_cards`, `get_course_assignments`, and `get_assignment_submission`.
+- define user-visible commands (e.g. `/courses`, `/calendar`)
+- provide inline navigation via inline keyboards (callback queries)
+- format Canvas data into readable Telegram messages
+- orchestrate multi-step flows (e.g. open course -> open assignment -> show score)
 
-- **User Store** (in `app/services/`)
-  - `models.User`: stores Telegram user identity and encrypted Canvas token.
-  - `user_store.get_user_canvas_token`: returns the decrypted Canvas token for a chat.
-  - `user_store.set_user_canvas_token`: creates/updates user entry and stores encrypted token.
+Key modules:
 
-- **Configuration & DB**
-  - `utils.config.get_canvas_base_url()` provides the Canvas base HTTP URL (`HTTP_URL` env variable).
-  - `services.db` configures the SQLAlchemy engine and session and creates tables.
+- `app/bot/telegram_bot.py`: registers handlers
+- `app/bot/commands.py`: commands + shared render helpers
+- `app/bot/callbacks.py`: central callback router (`main_menu_callback`)
+- `app/bot/keyboards.py`: callback_data generation contracts
+- `app/bot/datetime_utils.py`: formatting due dates and relative phrases
+- `app/bot/errors.py`: global error handler
 
-### 2.2 Data Flow
+### Canvas client (`app/canvas/*`)
 
-At a high level, handling a Canvas-related operation looks like this:
+Responsibilities:
 
-1. **Telegram → Bot**: The user sends a command or taps an inline button.
-2. **Bot → User Store**: The bot resolves the Telegram chat id, loads the associated user, and fetches the stored Canvas token (if any).
-3. **Bot → Canvas**: The bot calls the Canvas API via `canvas_client` using the user’s token (if present).
-4. **Canvas → Bot**: Canvas responds with JSON; the bot parses it into simplified Python structures.
-5. **Bot → Telegram**: The bot renders a human-friendly message and sends it back to the user, sometimes with inline keyboards for further navigation.
+- perform REST + GraphQL requests to Canvas
+- validate basic response type expectations (list/dict)
+- normalize Canvas JSON into simplified Python dicts that the bot can display
 
----
+Key modules:
 
-## 3. Telegram Commands and Callbacks
+- `app/canvas/canvas_client.py`
+- `app/canvas/queries.py`
 
-### 3.1 Commands
+### Token storage / user store (`app/services/*`)
 
-Implemented in `app/bot/commands.py`.
+The bot stores a Canvas token per Telegram user (by `chat_id`), encrypted at rest.
 
-#### `/start`
+Key calls in bot flows:
 
-- **Purpose**: Welcome the user and show the main menu.
-- **Processing**:
-  - Logs basic user info.
-  - Sends a welcome message describing what the bot can do.
-  - Attaches the main menu keyboard (`main_menu_keyboard`).
-- **Canvas usage**: None.
-
-#### `/help`
-
-- **Purpose**: Show available commands.
-- **Processing**:
-  - Logs basic user info.
-  - Sends a Markdown-formatted list of supported commands and their descriptions.
-- **Canvas usage**: None.
-
-#### `/settoken <YOUR_CANVAS_TOKEN>`
-
-- **Purpose**: Store the user’s personal Canvas API token.
-- **Processing**:
-  1. Resolve Telegram `chat_id`, `username`, `first_name`, and `last_name` from the update.
-  2. If `chat_id` is missing, respond with an error.
-  3. Validate that an argument was provided and is non-empty.
-  4. Call `set_user_canvas_token(chat_id, username, token, first_name, last_name)`:
-     - Creates or updates a `User` row.
-     - Encrypts the token with `utils.crypto.encrypt_text` before storing.
-  5. Attempt to delete the original `/settoken` message (to avoid leaving the raw token in chat history).
-  6. Send a confirmation message.
-- **Canvas usage**: None at this step (only stores the token locally).
-
-#### `/courses`
-
-- **Purpose**: Show a list of the user’s active Canvas courses.
-- **Processing**:
-  1. Resolve `chat_id` from the Telegram chat.
-  2. Use `get_user_canvas_token(chat_id)` to fetch and decrypt the stored Canvas token.
-  3. If no Canvas token is found, send instructions for how to create and set a token (`/settoken`).
-  4. If a token is present, call `render_courses(message, canvas_token)`.
-
-- **Response**:
-  - On success: a formatted course list showing course names, codes, sections, and term, plus a keyboard (`courses_keyboard`) for selecting a course.
-  - On error: a user-friendly message (no token, failed Canvas call, etc.) with a main menu keyboard.
-
-#### `/assignments`
-
-- **Purpose**: Show a “this month” overview of assignments across all active courses.
-- **Processing**:
-  1. Resolve `chat_id` from the Telegram chat.
-  2. Fetch Canvas token with `get_user_canvas_token(chat_id)`.
-  3. If no token, instruct the user to configure one via `/settoken`.
-  4. If a token exists, call `render_month_assignments_overview(message, canvas_token, filter_mode="todo")`.
-
-- **Response**:
-  - On success: a monthly overview that:
-    - Shows the period (e.g. "March 2026").
-    - Summarizes counts by bucket (to‑do / submitted / past due).
-    - Lists assignments in the selected bucket with course name, due date, and status.
-    - Includes an inline keyboard (`month_assignments_keyboard`) to switch between buckets.
-  - On error: appropriate error or guidance, plus the main menu keyboard.
-
-#### `/grades` and `/reminders`
-
-- **Purpose**: Placeholders for future features (grade summary and reminders).
-- **Processing**:
-  - Reply that the feature is not implemented yet, with the main menu keyboard.
-- **Canvas usage**: None currently.
-
-### 3.2 Inline Callback Handling
-
-Implemented in `app/bot/callbacks.py` via `main_menu_callback`.
-
-Key callback types include:
-
-- `assignments` – Show the monthly assignment overview.
-- `courses` – Show the course list.
-- `course:{course_id}` – Show a single course’s menu.
-- `course:{course_id}:assignments[:status][:page]` – Paginated course assignments view.
-- `course-assignment:{course_id}:{assignment_id}` – Detailed info for a specific assignment.
-- `assignment:{assignment_lid}:{submission_id}` – GraphQL-based assignment details.
-
-All callbacks that access Canvas use the shared helper `_require_canvas_token(query, action_text)`:
-
-1. Resolve `chat_id` from the callback’s message.
-2. Fetch the user’s Canvas token using `get_user_canvas_token(chat_id)`.
-3. If no token is found, edit the message with instructions for `/settoken` and exit.
-4. If a token exists, return it so the callback can call Canvas via `canvas_client`.
+- `services.user_store.get_user_canvas_token(chat_id)` -> `str | None`
+- `services.user_store.set_user_canvas_token(chat_id, username, token, first_name, last_name)`
 
 ---
 
-## 4. Canvas HTTP Requests and Responses
+## 2) End-to-end data flow
 
-All Canvas calls use the base URL from `utils.config.get_canvas_base_url()` which reads `HTTP_URL` from the environment. Each call includes the user’s token:
+### 2.1 Token-dependent actions
 
-- `Authorization: Bearer <user_canvas_token>`
+Any action requiring Canvas data follows a consistent pattern:
 
-These calls are implemented in `app/canvas/canvas_client.py`.
+1. **User triggers action**
+   - sends a command (`/courses`)
+   - or taps an inline button (`callback_data="courses"`)
 
-### 4.1 Dashboard Cards (Courses)
+2. **Bot resolves Telegram identity**
+   - command path: `update.effective_chat.id`
+   - callback path: `query.message.chat.id`
 
-- **Function**: `get_dashboard_cards(canvas_token: str | None) -> list[dict[str, Any]]`
-- **HTTP request**:
-  - `GET {HTTP_URL}/v1/dashboard/dashboard_cards`
-  - Headers: `Authorization: Bearer <token>`
-- **Purpose**: Fetch the user’s dashboard courses and present them as simplified course dicts.
-- **Used by**:
-  - `render_courses`
-  - `render_course_assignments` (for course labels)
-  - `render_month_assignments_overview` (to iterate courses)
+3. **Bot fetches stored Canvas token**
+   - `get_user_canvas_token(chat_id)`
+   - if missing, the bot sends instructions:
+     - “Send it using: `/settoken YOUR_CANVAS_TOKEN`”
+     - explains where to generate the token in Canvas UI
 
-### 4.2 Course Assignments
+4. **Bot calls Canvas**
+   - REST: `/v1/...`
+   - GraphQL: `/graphql`
 
-- **Function**: `get_course_assignments(course_id: int, canvas_token: str | None) -> list[dict[str, Any]]`
-- **HTTP request**:
-  - `GET {HTTP_URL}/v1/courses/{course_id}/assignment_groups`
-  - Query params: `include[]=assignments`, `per_page=50`
-  - Headers: `Authorization: Bearer <token>`
-- **Purpose**:
-  - Fetch all assignment groups for a course and flatten to a single list of assignments.
-  - Sorts assignments by `due_at` (earliest first, undated last).
-- **Used by**:
-  - `render_course_assignments` (per-course assignment lists and pagination).
-  - `render_month_assignments_overview` (aggregated monthly view across courses).
-  - `main_menu_callback` when opening a specific course assignment.
-
-### 4.3 Assignment Submission
-
-- **Function**: `get_assignment_submission(course_id: int, assignment_id: int, canvas_token: str | None) -> dict[str, Any]`
-- **HTTP request**:
-  - `GET {HTTP_URL}/v1/courses/{course_id}/assignments/{assignment_id}/submissions/self`
-  - Headers: `Authorization: Bearer <token>`
-- **Purpose**:
-  - Fetch the current user’s submission data including `score`.
-- **Used by**:
-  - `main_menu_callback` for `course-assignment:{course_id}:{assignment_id}` to display score and points possible.
-
-### 4.4 GraphQL Assignment Details
-
-- **Function**: `get_student_assignment(assignment_lid: str, submission_id: str, canvas_token: str | None) -> dict[str, Any]`
-- **HTTP request**:
-  - `POST {HTTP_URL}/graphql`
-  - Headers:
-    - `Authorization: Bearer <token>`
-    - `Content-Type: application/json`
-  - JSON body:
-    - `operationName`: `GetStudentAssignment`
-    - `variables`: `{ "assignmentLid": ..., "submissionID": ... }`
-    - `query`: `GET_STUDENT_ASSIGNMENT_QUERY` from `canvas.queries`.
-- **Purpose**:
-  - Retrieve richer assignment and submission info through Canvas GraphQL.
-- **Used by**:
-  - `main_menu_callback` for `assignment:{assignment_lid}:{submission_id}` when the user opens a specific assignment via GraphQL.
+5. **Bot renders output**
+   - responds with `reply_text` or edits an existing message via `edit_text`
+   - attaches inline keyboards for next navigation step
 
 ---
 
-## 5. Guidelines for Future Changes
+## 3) Command flows (examples)
 
-To keep the system consistent and maintainable:
+### `/courses`
 
-- **Adding a new Canvas-backed command** (e.g. `/grades`):
-  1. Resolve `chat_id`.
-  2. Fetch Canvas token with `get_user_canvas_token(chat_id)`.
-  3. If no token, send clear instructions to configure one via `/settoken`.
-  4. If a token exists, call the appropriate `canvas_client` helper.
-  5. Render a user-friendly message and attach keyboards as needed.
+- `courses_command`:
+  - gets token
+  - calls `render_courses`
+- `render_courses`:
+  - calls `get_dashboard_cards`
+  - filters to `enrollmentState == "active"`
+  - attaches `courses_keyboard`, which uses `callback_data="course:<id>"`
 
-- **Adding a new Canvas-backed inline callback**:
-  1. Route the callback data in `main_menu_callback`.
-  2. Inside the handler, call `_require_canvas_token(query, action_text)`.
-  3. If it returns `None`, stop; otherwise, use the token to call Canvas.
+### `/assignments`
 
-- **Changing the Canvas base URL**:
-  - Update the `HTTP_URL` environment variable or `utils.config.get_canvas_base_url` implementation as needed.
+- `assignments_command`:
+  - gets token
+  - calls `render_month_assignments_overview(compact=True)`
+- `render_month_assignments_overview`:
+  - reads dashboard cards (active courses)
+  - loads per-course assignments from `get_course_assignments`
+  - filters to “current month” by `due_at`
+  - buckets items:
+    - `todo` / `submitted` / `past`
+  - chooses a “Next up” urgent assignment
+  - attaches `month_assignments_keyboard` (toggle compact/full + urgent actions)
 
-For function-level inputs and outputs, refer to the dedicated Telegram and Canvas API docs mentioned in the overview.
+### `/calendar`
+
+- `calendar_command`:
+  - gets token
+  - builds context codes (`course_<id>`) from active dashboard cards
+  - calls `get_calendar_events` for current-month ± 7 days window
+  - builds `assignments_by_date`
+  - replies with `calendar_keyboard` which encodes:
+    - `cal:prev:YYYY-MM`
+    - `cal:next:YYYY-MM`
+    - `cal:day:YYYY-MM-DD[:assignments|:urgent]`
+
+### `/download`
+
+- `download_command`:
+  - uses same time window + course context codes as calendar
+  - calls `get_calendar_events`
+  - scrapes `data-api-endpoint="..."` links from `description` HTML
+  - for each endpoint:
+    - `download_canvas_file` -> temp path + filename
+    - replies with `reply_document`
+    - deletes the temp file
+
+---
+
+## 4) Inline navigation flows
+
+### 4.1 Main menu routing
+
+All inline keyboard presses route into:
+
+- `main_menu_callback(update, context)`
+
+Main menu callback_data:
+
+- `courses`, `calendar`, `assignments`, `help`, `grades`, `reminders`, `menu`
+
+### 4.2 Course selection -> course menu
+
+1. user taps a course in `courses_keyboard`
+2. callback_data: `course:<course_id>`
+3. `main_menu_callback`:
+   - loads dashboard cards again
+   - finds the selected course
+   - edits message with course label + `course_menu_keyboard(course_id)`
+
+### 4.3 Course menu -> course assignments
+
+1. user taps “Upcoming Assignments” or “Past Assignments”
+2. callback_data:
+   - `course:<id>:assignments:upcoming`
+   - `course:<id>:assignments:past`
+3. `main_menu_callback` calls:
+   - `render_course_assignments(..., status=<past|upcoming>, page=1, edit=True)`
+
+### 4.4 Assignment details (REST path)
+
+1. user taps an assignment in `course_assignments_keyboard`
+2. callback_data: `course-assignment:<course_id>:<assignment_id>`
+3. callback handler:
+   - calls `get_course_assignments` and selects the assignment
+   - calls `get_assignment_submission` to load the score (best-effort)
+   - edits the message with a summary and back button
+
+### 4.5 Assignment details (GraphQL path)
+
+1. user taps an assignment entry that uses global identifiers (from other list flows)
+2. callback_data: `assignment:<assignment_lid>:<submission_id>`
+3. callback handler:
+   - calls `get_student_assignment` (GraphQL)
+   - renders points possible + score + due date and shows back button
+
+---
+
+## 5) Reliability and UX design notes
+
+### 5.1 Callback deduplication
+
+`main_menu_callback` deduplicates repeated taps:
+
+- key: `<user_id>:<callback_data>`
+- ignores duplicates within 10 seconds and responds:
+  - `"Still processing your previous request, please wait…"`
+
+This prevents:
+
+- duplicate Canvas calls
+- Telegram “message is not modified” / rapid edits
+- repeated downloads
+
+### 5.2 Temp file lifecycle for downloads
+
+`download_canvas_file` writes to a temp file and returns the path.
+The caller (command or callback) is responsible for deleting it after sending.
+
+### 5.3 Time handling
+
+- Calendar windowing uses UTC timestamps (`datetime.now(timezone.utc)`)
+- Relative “due” messaging uses utilities in `app/bot/datetime_utils.py` for consistent formatting
+
+---
+
+## 6) How to add a new Canvas-backed feature
+
+### New command
+
+1. create handler in `app/bot/commands.py`
+2. resolve token via `get_user_canvas_token(chat_id)` with helpful `/settoken` error path
+3. call the necessary `canvas_client` function(s)
+4. render and attach a keyboard if needed
+5. register the command in `app/bot/telegram_bot.py`
+
+### New callback route
+
+1. define a stable callback_data format in `app/bot/keyboards.py`
+2. add a routing branch in `main_menu_callback`
+3. use `_require_canvas_token(query, action_text)` before Canvas calls
+4. prefer `edit_message_text` to keep the interaction single-message where possible

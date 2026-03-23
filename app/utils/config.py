@@ -5,6 +5,25 @@ import dotenv
 dotenv.load_dotenv()
 
 
+REQUIRED_ENV_VARS: list[str] = [
+    "TELEGRAM_BOT_TOKEN",
+    "HTTP_URL",
+    "COURSEMATE_ENCRYPTION_SECRET",
+]
+
+
+def validate_required_env_vars() -> list[str]:
+    """Return a list of missing required environment variable keys.
+
+    These are the keys that must be present in the environment (or .env):
+    - TELEGRAM_BOT_TOKEN
+    - HTTP_URL
+    - COURSEMATE_ENCRYPTION_SECRET
+    """
+
+    return [key for key in REQUIRED_ENV_VARS if not os.getenv(key)]
+
+
 def get_environment() -> str:
     """Return the current application environment.
 
