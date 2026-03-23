@@ -11,11 +11,16 @@ APP = app/main.py
 # -----------------------------
 
 .PHONY: setup
-setup: ## Install dependencies including dev tools
+setup: ## Install dependencies (including dev)
+	$(UV) sync --extra dev
+
+.PHONY: reset
+reset: ## Recreate virtual environment cleanly
+	rm -rf .venv
 	$(UV) sync --extra dev
 
 .PHONY: lock
-lock: ## Update dependency lockfile
+lock: ## Update lockfile
 	$(UV) lock
 
 # -----------------------------
@@ -27,7 +32,7 @@ run: ## Run the application
 	$(UV) run python $(APP)
 
 .PHONY: dev
-dev: ## Run bot with auto-reload
+dev: ## Run with auto-reload
 	$(UV) run watchfiles python $(APP)
 
 # -----------------------------
@@ -36,10 +41,10 @@ dev: ## Run bot with auto-reload
 
 .PHONY: lint
 lint: ## Run linter
-	$(UV) run ruff check --fix app
+	$(UV) run ruff check app
 
 .PHONY: lint-fix
-lint-fix: ## Auto-fix lint issues
+lint-fix: ## Fix lint issues
 	$(UV) run ruff check --fix app
 
 .PHONY: format
@@ -53,6 +58,9 @@ format-check: ## Check formatting
 .PHONY: typecheck
 typecheck: ## Run type checking
 	$(UV) run mypy app
+
+.PHONY: check
+check: lint typecheck ## Run all checks
 
 # -----------------------------
 # Testing
@@ -70,9 +78,7 @@ test: ## Run tests
 clean: ## Remove cache files
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
-	rm -rf .pytest_cache
-	rm -rf .mypy_cache
-	rm -rf .ruff_cache
+	rm -rf .pytest_cache .mypy_cache .ruff_cache
 
 # -----------------------------
 # Help

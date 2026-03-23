@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
+    "anyio>=4.0.0",
     "python-dotenv>=1.2.2",
     "python-telegram-bot>=22.6",
     "requests>=2.32.5",
@@ -19,24 +20,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "black>=24.1.0",
-    "ruff>=0.4.0",
+    "ruff>=0.15.6",   # ✅ unified version
     "mypy>=1.8.0",
     "pytest>=7.4.0",
     "watchfiles>=0.21.0",
     "types-requests",
 ]
 
-# -----------------------------
-# Black configuration
-# -----------------------------
-
 [tool.black]
 line-length = 88
 target-version = ["py312"]
-
-# -----------------------------
-# Ruff configuration
-# -----------------------------
 
 [tool.ruff]
 line-length = 88
@@ -49,16 +42,7 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["bot", "canvas", "services", "utils", "ui"]
 
-# -----------------------------
-# Mypy configuration
-# -----------------------------
-
 [tool.mypy]
 python_version = "3.12"
 strict = false
 ignore_missing_imports = true
-
-[dependency-groups]
-dev = [
-    "types-requests>=2.32.4.20260107",
-]

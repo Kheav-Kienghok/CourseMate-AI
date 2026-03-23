@@ -62,3 +62,15 @@ ai-telegram-course-bot/
 ├── README.md
 └── docker-compose.yml          # Optional deployment
 ```
+
+```bash
+make setup      # install everything
+make run        # run bot
+make dev        # hot reload
+make lint       # check lint
+make lint-fix   # auto-fix
+make format     # format code
+make check      # lint + typecheck
+make test       # run tests
+make reset      # nuke + reinstall env
+```

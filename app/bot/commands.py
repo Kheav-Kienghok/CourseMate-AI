@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import calendar as _calendar
+import html
 import logging
 import os
 import re
-import html
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
+import anyio
 from telegram import InputFile, Update
 from telegram.ext import ContextTypes
 
@@ -966,11 +967,13 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             caption = f"{course_name}\nTitle: {title}"
 
             try:
-                with open(tmp_path, "rb") as fh:
-                    await message.reply_document(
-                        document=InputFile(fh, filename=filename),
-                        caption=caption,
-                    )
+                async with await anyio.open_file(tmp_path, "rb") as fh:
+                    content = await fh.read()
+
+                await message.reply_document(
+                    document=InputFile(content, filename=filename),
+                    caption=caption,
+                )
                 lines.append(f"  File: {filename}")
             finally:
                 try:

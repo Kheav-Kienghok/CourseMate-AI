@@ -3,10 +3,11 @@ from __future__ import annotations
 import html
 import logging
 import os
-import tempfile
 import re
+import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
+import anyio
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 
 from bot.commands import (
@@ -70,10 +71,35 @@ async def main_menu_callback(
     if not query:
         return
 
-    await query.answer()
-
     user = query.from_user
     data = query.data
+
+    # Simple dedupe for repeated taps on slow connections:
+    # if the same user sends the same callback data within a short time
+    # window, treat it as already in progress and ignore duplicates.
+    user_data = context.user_data
+    if user_data is None:
+        user_data = {}
+    last_callbacks = user_data.setdefault("_cm_last_callbacks", {})
+
+    key_parts: list[str] = []
+    if getattr(user, "id", None) is not None:
+        key_parts.append(str(user.id))
+    key_parts.append(str(data))
+    key = ":".join(key_parts)
+
+    now = time.monotonic()
+    last_ts = last_callbacks.get(key)
+    if isinstance(last_ts, (int, float)) and now - float(last_ts) < 10.0:
+        await query.answer(
+            "Still processing your previous request, please wait…",
+            show_alert=False,
+        )
+        return
+
+    last_callbacks[key] = now
+
+    await query.answer()
 
     logger.info(
         "Received callback '%s' from user_id=%s username=%s",
@@ -207,11 +233,13 @@ async def main_menu_callback(
                         try:
                             msg = update.effective_message
                             if msg is not None:
-                                with open(tmp_path, "rb") as fh:
-                                    await msg.reply_document(
-                                        document=InputFile(fh, filename=filename),
-                                        caption=caption,
-                                    )
+                                async with await anyio.open_file(tmp_path, "rb") as fh:
+                                    content = await fh.read()
+
+                                await msg.reply_document(
+                                    document=InputFile(content, filename=filename),
+                                    caption=caption,
+                                )
                         finally:
                             try:
                                 os.remove(tmp_path)
