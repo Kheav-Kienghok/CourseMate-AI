@@ -132,9 +132,9 @@ def _build_assignment_detail_text(
 
     if has_submitted is not None:
         if has_submitted:
-            lines.append("📌 You have submitted this assignment.")
+            lines.append("✅ You have submitted this assignment.")
         else:
-            lines.append("📌 You have not submitted this assignment yet.")
+            lines.append("❌ You have not submitted this assignment yet.")
 
     # Blank line before timestamps
     lines.append("")
@@ -299,10 +299,21 @@ async def handle_calendar_callback(
                         # Extract Canvas file API URLs from description HTML
                         api_endpoints = file_pattern.findall(raw_desc)
 
-                        # Clean description for display
-                        clean_desc = re.sub(r"<[^>]+>", "", raw_desc)
-                        clean_desc = html.unescape(clean_desc)
-                        clean_desc = re.sub(r"\s+", " ", clean_desc).strip()
+                        # Clean description for display.
+                        # Treat non‑breaking spaces as line‑break separators so
+                        # long descriptions become easier to read.
+                        normalized = raw_desc.replace("&nbsp;", "\n")
+
+                        # Strip HTML tags but keep the newlines we just added.
+                        normalized = re.sub(r"<[^>]+>", "", normalized)
+                        normalized = html.unescape(normalized)
+
+                        # Collapse runs of spaces and tabs, but preserve
+                        # explicit line breaks.
+                        normalized = re.sub(r"[ \t\r\f\v]+", " ", normalized)
+                        normalized = re.sub(r"\n{2,}", "\n", normalized)
+
+                        clean_desc = normalized.strip()
 
                     # Nicely formatted block per assignment
                     lines.append(f"• *{course_name}*")

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import calendar as _calendar
-import html
 import logging
-import os
-import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
-import anyio
-from telegram import InputFile, Update
+from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.keyboards import (
@@ -20,7 +17,6 @@ from bot.keyboards import (
     month_assignments_keyboard,
 )
 from canvas.canvas_client import (
-    download_canvas_file,
     get_calendar_events,
     get_course_assignments,
     get_dashboard_cards,
@@ -56,6 +52,36 @@ def _to_canvas_iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+def _is_duplicate_command(
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    name: str,
+    window_seconds: float = 5.0,
+) -> bool:
+    """Return True if this command was just used by the same user.
+
+    This prevents users from triggering expensive commands (like /courses)
+    multiple times in quick succession and receiving duplicate responses.
+    """
+
+    user_data = context.user_data or {}
+    last_cmds = user_data.setdefault("_cm_last_commands", {})
+
+    key_parts: list[str] = []
+    if getattr(user, "id", None) is not None:
+        key_parts.append(str(user.id))
+    key_parts.append(name)
+    key = ":".join(key_parts)
+
+    now = time.monotonic()
+    last_ts = last_cmds.get(key)
+    if isinstance(last_ts, (int, float)) and now - float(last_ts) < window_seconds:
+        return True
+
+    last_cmds[key] = now
+    return False
+
+
 async def _get_chat_id_or_error(update: Update) -> int | None:
     """Return chat_id for the update, or reply with an error and return None."""
 
@@ -79,8 +105,6 @@ async def _get_chat_id_or_error(update: Update) -> int | None:
 # -----------------------------------------------------------
 # Shared renderers
 # -----------------------------------------------------------
-
-
 async def render_courses(message, canvas_token: str, edit: bool = False) -> None:
     """Render the course list either by replying or editing."""
 
@@ -116,32 +140,9 @@ async def render_courses(message, canvas_token: str, edit: bool = False) -> None
 
     term = dashboard_cards[0].get("term", "Unknown Term")
 
-    lines: list[str] = [
-        "📚 *YOUR COURSES*",
-        f"🎓 _{term}_",
-        "━━━━━━━━━━━━━━━",
-        "",
-    ]
-
-    for course in dashboard_cards:
-
-        if course.get("enrollmentState") != "active":
-            continue
-
-        name = (
-            course.get("shortName")
-            or course.get("originalName")
-            or str(course.get("id"))
-        )
-
-        course_code = course.get("courseCode", "")
-        section = course.get("section", "")
-
-        full_name = f"{name} ({course_code}) - Section {section}".strip()
-
-        lines.append(f"- *{full_name}*")
-
-    text = "\n".join(lines)
+    # Keep the header compact since the actual course list is presented
+    # as buttons below.
+    text = f"📚 *Your courses for* _{term}_\nChoose a course and keep making progress today 🔥"
 
     if edit:
         await message.edit_text(
@@ -775,6 +776,13 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     user = update.effective_user
 
+    if _is_duplicate_command(context, user, "courses"):
+        await message.reply_text(
+            "Still processing your previous /courses request, please wait…",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
     logger.info(
         "Received /courses from user_id=%s username=%s",
         getattr(user, "id", None),
@@ -814,6 +822,13 @@ async def assignments_command(
         return
 
     user = update.effective_user
+
+    if _is_duplicate_command(context, user, "assignments"):
+        await message.reply_text(
+            "Still processing your previous /assignments request, please wait…",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
 
     logger.info(
         "Received /assignments from user_id=%s username=%s",
@@ -866,11 +881,10 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Extracts Canvas file API links (data-api-endpoint) from assignment
     descriptions in the same calendar window used by /calendar and
     sends them to the user.
-    """
 
-    message = update.effective_message
-    if not message:
-        return
+    This behavior is currently disabled to avoid bulk file downloads
+    when users invoke /download.
+    """
 
     user = update.effective_user
 
@@ -879,138 +893,8 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         getattr(user, "id", None),
         getattr(user, "username", None),
     )
-
-    chat_id = await _get_chat_id_or_error(update)
-    if chat_id is None:
-        return
-
-    canvas_token = get_user_canvas_token(chat_id)
-
-    if not canvas_token:
-        await message.reply_text(
-            "To fetch assignment downloads, please set your personal Canvas API token first.\n\n"
-            "Send it using:\n"
-            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
-            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    # Use the same time window as /calendar (current month ± 7 days).
-    now_utc = datetime.now(timezone.utc)
-    _year, _month, start_dt, end_dt = _month_window(now_utc)
-
-    # Build context codes from the user's active dashboard courses.
-    try:
-        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to load courses for download list: %s", exc)
-        await message.reply_text(
-            f"Failed to load courses for downloads: {exc}",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    context_codes: list[str] = []
-    for course in dashboard_cards:
-        if course.get("enrollmentState") != "active":
-            continue
-        course_id = course.get("id")
-        if course_id is not None:
-            context_codes.append(f"course_{course_id}")
-
-    try:
-        events = get_calendar_events(
-            canvas_token=canvas_token,
-            start_date=_to_canvas_iso(start_dt),
-            end_date=_to_canvas_iso(end_dt),
-            context_codes=context_codes,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to load calendar events for downloads: %s", exc)
-        await message.reply_text(
-            f"Failed to load calendar events: {exc}",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    lines: list[str] = [
-        "📥 *Download links from your assignments*",
-        "",
-    ]
-
-    link_count = 0
-    pattern = re.compile(r'data-api-endpoint="([^"]+)"')
-
-    for event in events:
-        raw_desc_html = event.get("description") or ""
-        if not raw_desc_html:
-            continue
-
-        # Extract Canvas file API URLs from the HTML description
-        links = pattern.findall(raw_desc_html)
-        if not links:
-            continue
-
-        # Clean description text (strip tags, decode HTML entities, normalize spaces)
-        clean_desc = re.sub(r"<[^>]+>", "", raw_desc_html)
-        clean_desc = html.unescape(clean_desc)
-        clean_desc = re.sub(r"\s+", " ", clean_desc).strip()
-
-        course_name = event.get("context_name") or "Unknown course"
-        title = event.get("title") or "Assignment"
-
-        # Block-style summary per assignment
-        lines.append(f"• {course_name}")
-        lines.append(f"  Title: {title}")
-        if clean_desc:
-            lines.append(f"  Description: {clean_desc}")
-
-        # Download and send each linked file to the user
-        for api_endpoint in links:
-            try:
-                tmp_path, filename, _mime = download_canvas_file(
-                    canvas_token, api_endpoint
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Failed to download Canvas file %s: %s", api_endpoint, exc)
-                lines.append(f"  File (failed): {api_endpoint} — {exc}")
-                continue
-
-            link_count += 1
-            caption = f"{course_name}\nTitle: {title}"
-
-            try:
-                async with await anyio.open_file(tmp_path, "rb") as fh:
-                    content = await fh.read()
-
-                await message.reply_document(
-                    document=InputFile(content, filename=filename),
-                    caption=caption,
-                )
-                lines.append(f"  File: {filename}")
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    logger.warning("Failed to remove temp file %s", tmp_path)
-
-        lines.append("")
-
-    if link_count == 0:
-        await message.reply_text(
-            "No downloadable Canvas files were found in your current calendar assignments.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    await message.reply_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-        reply_markup=main_menu_keyboard(),
-    )
+    # Intentionally do nothing; /download is disabled.
+    return
 
 
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
