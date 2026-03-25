@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+import calendar as _calendar
 import html
 import logging
 import os
 import re
 import time
-import calendar as _calendar
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import anyio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 
 from bot.commands import (
+    _build_assignments_by_date,
     _to_canvas_iso,
     calendar_command,
     grades_command,
@@ -23,7 +24,12 @@ from bot.commands import (
     render_month_assignments_overview,
 )
 from bot.datetime_utils import _format_due_with_relative
-from bot.keyboards import calendar_keyboard, course_menu_keyboard, main_menu_keyboard
+from bot.keyboards import (
+    calendar_keyboard,
+    course_menu_keyboard,
+    main_menu_keyboard,
+    reminders_keyboard,
+)
 from canvas.canvas_client import (
     download_canvas_file,
     get_assignment_submission,
@@ -32,7 +38,11 @@ from canvas.canvas_client import (
     get_dashboard_cards,
     get_student_assignment,
 )
-from services.user_store import get_user_canvas_token
+from services.user_store import (
+    get_planner_announcement_notifications,
+    get_user_canvas_token,
+    set_planner_announcement_notifications,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +204,9 @@ async def main_menu_callback(
 
     if data.startswith("assignments:"):
         return await handle_assignments_callback(update, context)
+
+    if data.startswith("reminders:"):
+        return await handle_reminders_callback(update, context)
 
     return await handle_general_callback(update, context)
 
@@ -438,47 +451,7 @@ async def handle_calendar_callback(
                 )
                 return
 
-            assignments_by_date: dict[str, list[dict]] = {}
-            today_date = date.today()
-
-            for event in events:
-                raw_date = event.get("start_at")
-                if not raw_date:
-                    continue
-
-                if "T" in raw_date:
-                    date_str = raw_date.split("T", maxsplit=1)[0]
-                else:
-                    date_str = raw_date
-
-                try:
-                    event_date = datetime.fromisoformat(date_str).date()
-                except Exception:  # noqa: BLE001
-                    try:
-                        event_date = date.fromisoformat(date_str)
-                    except Exception:  # noqa: BLE001
-                        continue
-
-                has_submitted = bool(event.get("has_submitted"))
-
-                if event_date <= today_date:
-                    status = "past_submitted" if has_submitted else "past_unsubmitted"
-                else:
-                    status = "upcoming"
-
-                title = event.get("title") or "Assignment"
-                description = event.get("description") or "Description not available"
-                course_name = event.get("context_name") or "Unknown course"
-
-                assignments_by_date.setdefault(date_str, []).append(
-                    {
-                        "title": title,
-                        "description": description,
-                        "status": status,
-                        "has_submitted": has_submitted,
-                        "course_name": str(course_name),
-                    }
-                )
+            assignments_by_date = _build_assignments_by_date(events)
 
             await query.edit_message_reply_markup(
                 reply_markup=calendar_keyboard(
@@ -543,6 +516,68 @@ async def handle_assignments_callback(
             )
         else:
             await query.answer("Action not recognized.")
+
+
+async def handle_reminders_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle callbacks starting with "reminders:" for notification settings."""
+
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+
+    # Ignore informational/status-only button.
+    if data == "reminders:ignore":
+        await query.answer()
+        return
+
+    chat = query.message.chat if query.message else None
+    chat_id = getattr(chat, "id", None) if chat else None
+    if chat_id is None:
+        await query.edit_message_text(
+            "I couldn't identify your Telegram user. Please try again.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    parts = data.split(":")
+    if len(parts) < 3:
+        await query.answer("Unknown reminders action.")
+        return
+
+    _scope, feature, choice = parts[0], parts[1], parts[2]
+
+    if feature != "announcements":
+        await query.answer("Unknown reminders feature.")
+        return
+
+    enable = choice == "yes"
+
+    set_planner_announcement_notifications(chat_id, enable)
+
+    enabled = get_planner_announcement_notifications(chat_id)
+
+    if enable:
+        toast = "Announcement notifications enabled."
+    else:
+        toast = "Announcement notifications disabled."
+
+    await query.answer(toast, show_alert=False)
+
+    text = (
+        "⏰ *Planner Notifications*\n\n"
+        "Would you like to receive Telegram notifications when there are "
+        "unread Canvas announcements with new activity?"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=reminders_keyboard(enabled),
+    )
 
 
 async def handle_course_callback(

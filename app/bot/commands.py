@@ -9,17 +9,20 @@ from typing import Any, cast
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot.datetime_utils import _format_due_with_relative
 from bot.keyboards import (
     calendar_keyboard,
     course_assignments_keyboard,
     courses_keyboard,
     main_menu_keyboard,
     month_assignments_keyboard,
+    reminders_keyboard,
 )
 from canvas.canvas_client import (
     get_calendar_events,
     get_course_assignments,
     get_dashboard_cards,
+    get_planner_items,
 )
 from services.user_store import get_user_canvas_token, set_user_canvas_token
 
@@ -44,6 +47,68 @@ def _month_window(now_utc: datetime) -> tuple[int, int, datetime, datetime]:
     end_dt = last_of_month + timedelta(days=7)
 
     return year, month, start_dt, end_dt
+
+
+def _build_assignments_by_date(
+    events: list[dict],
+    *,
+    today: date | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Transform Canvas calendar events into an assignments-by-date mapping.
+
+    Shared by /calendar and calendar navigation callbacks to keep the
+    calendar keyboard markers and click behaviour consistent.
+    """
+
+    assignments_by_date: dict[str, list[dict[str, Any]]] = {}
+
+    today_date = today or date.today()
+
+    for event in events:
+        # get_calendar_events returns a simplified event dict with
+        # a normalized "start_at" timestamp. We only need the
+        # calendar date portion (YYYY-MM-DD).
+        raw_date = event.get("start_at")
+        if not raw_date:
+            continue
+
+        if "T" in raw_date:
+            date_str = raw_date.split("T", maxsplit=1)[0]
+        else:
+            date_str = raw_date
+
+        # Basic safety: skip events we cannot parse into a valid date.
+        try:
+            event_date = datetime.fromisoformat(date_str).date()
+        except Exception:  # noqa: BLE001
+            try:
+                event_date = date.fromisoformat(date_str)
+            except Exception:  # noqa: BLE001
+                continue
+
+        # Determine status based on due date vs today and submission state.
+        has_submitted = bool(event.get("has_submitted"))
+
+        if event_date <= today_date:
+            status = "past_submitted" if has_submitted else "past_unsubmitted"
+        else:
+            status = "upcoming"
+
+        title = event.get("title") or "Assignment"
+        description = event.get("description") or "Description not available"
+        course_name = event.get("context_name") or "Unknown course"
+
+        assignments_by_date.setdefault(date_str, []).append(
+            {
+                "title": title,
+                "description": description,
+                "status": status,
+                "has_submitted": has_submitted,
+                "course_name": str(course_name),
+            }
+        )
+
+    return assignments_by_date
 
 
 def _to_canvas_iso(dt: datetime) -> str:
@@ -615,6 +680,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🚀 */start* — Introduce the bot\n"
         "📖 */courses* — Show your courses\n"
         "📝 */assignments* — This month's assignment To-Do list\n"
+        "🗓 */planner* — Upcoming incomplete planner assignments\n"
         "📅 */calendar* — Open date picker calendar\n"
         "📊 */grades* — Current grades\n"
         "⏰ */reminders* — Manage reminders\n"
@@ -682,8 +748,6 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if course_id is not None:
             context_codes.append(f"course_{course_id}")
 
-    assignments_by_date: dict[str, list[dict[str, Any]]] = {}
-
     try:
         events = get_calendar_events(
             canvas_token=canvas_token,
@@ -699,53 +763,7 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    today_date = date.today()
-
-    for event in events:
-        # get_calendar_events returns a simplified event dict with
-        # a normalized "start_at" timestamp. We only need the
-        # calendar date portion (YYYY-MM-DD).
-        raw_date = event.get("start_at")
-        if not raw_date:
-            continue
-
-        if "T" in raw_date:
-            date_str = raw_date.split("T", maxsplit=1)[0]
-        else:
-            date_str = raw_date
-
-        # Basic safety: skip events outside our month window.
-        try:
-            event_date = datetime.fromisoformat(date_str).date()
-        except Exception:  # noqa: BLE001
-            # Fallback: best-effort parse using simple slicing.
-            try:
-                event_date = date.fromisoformat(date_str)
-            except Exception:  # noqa: BLE001
-                continue
-
-        # Determine status based on due date vs today and submission state.
-        has_submitted = bool(event.get("has_submitted"))
-
-        if event_date <= today_date:
-            status = "past_submitted" if has_submitted else "past_unsubmitted"
-        else:
-            status = "upcoming"
-
-        title = event.get("title") or "Assignment"
-        description = event.get("description") or "Description not available"
-
-        course_name = event.get("context_name") or "Unknown course"
-
-        assignments_by_date.setdefault(date_str, []).append(
-            {
-                "title": title,
-                "description": description,
-                "status": status,
-                "has_submitted": has_submitted,
-                "course_name": str(course_name),
-            }
-        )
+    assignments_by_date = _build_assignments_by_date(events)
 
     legend_lines = [
         "📅 Choose a date from the calendar below:",
@@ -862,6 +880,185 @@ async def assignments_command(
     )
 
 
+async def planner_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /planner command.
+
+    Shows upcoming, incomplete assignment items from the Canvas planner.
+    """
+
+    message = update.effective_message
+    if not message:
+        return
+
+    user = update.effective_user
+
+    logger.info(
+        "Received /planner from user_id=%s username=%s",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+    )
+
+    chat_id = await _get_chat_id_or_error(update)
+    if chat_id is None:
+        return
+
+    canvas_token = get_user_canvas_token(chat_id)
+    if not canvas_token:
+        await message.reply_text(
+            "To load your upcoming planner assignments, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    try:
+        items = get_planner_items(
+            canvas_token=canvas_token,
+            # Use a fixed term start date so we include all
+            # relevant planner items from the semester onwards.
+            start_date=_to_canvas_iso(
+                datetime(2025, 9, 25, tzinfo=timezone.utc),
+            ),
+            filter="incomplete_items",
+            order="asc",
+            per_page=14,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load planner items: %s", exc)
+        await message.reply_text(
+            f"Failed to load planner items: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    upcoming: list[dict] = []
+    for item in items:
+        if item.get("plannable_type") != "assignment":
+            continue
+
+        submissions = item.get("submissions") or {}
+        if submissions.get("submitted"):
+            continue
+
+        plannable = item.get("plannable") or {}
+
+        upcoming.append(
+            {
+                "course_name": item.get("context_name") or "Unknown course",
+                "title": plannable.get("title") or f"Assignment {plannable.get('id')}",
+                "due_at": plannable.get("due_at"),
+            }
+        )
+
+    if not upcoming:
+        await message.reply_text(
+            "You have no incomplete planner assignments starting from today.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    lines: list[str] = ["📝 *Upcoming planner assignments*", ""]
+
+    for entry in upcoming:
+        course_name = entry["course_name"]
+        title = entry["title"]
+        due_at = entry["due_at"]
+
+        pretty_due = _format_due_with_relative(due_at) or (
+            due_at or "Due date not available"
+        )
+
+        lines.append(f"• *{title}* — _{course_name}_")
+        lines.append(f"  {pretty_due}")
+
+    await message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+async def send_planner_announcement_notifications_for_chat(
+    chat_id: int,
+    *,
+    application,
+) -> None:
+    """Send unread announcement notifications for a single chat, if any.
+
+    Used by scheduled jobs; respects the user's Canvas token and
+    Canvas planner state (new_activity + unread announcements).
+    """
+
+    canvas_token = get_user_canvas_token(chat_id)
+    if not canvas_token:
+        return
+
+    try:
+        items = get_planner_items(
+            canvas_token=canvas_token,
+            # Use a fixed term start date to catch new activity
+            # on announcements throughout the semester.
+            start_date=_to_canvas_iso(
+                datetime(2025, 9, 25, tzinfo=timezone.utc),
+            ),
+            filter="new_activity",
+            order="asc",
+            per_page=50,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Failed to load planner items for announcements (chat_id=%s): %s",
+            chat_id,
+            exc,
+        )
+        return
+
+    announcements: list[dict] = []
+
+    for item in items:
+        if item.get("plannable_type") != "announcement":
+            continue
+
+        if not item.get("new_activity"):
+            continue
+
+        plannable = item.get("plannable") or {}
+
+        read_state = plannable.get("read_state") or "unknown"
+
+        if read_state == "read":
+            continue
+
+        announcements.append(
+            {
+                "course_name": item.get("context_name") or "Unknown course",
+                "title": plannable.get("title")
+                or f"Announcement {plannable.get('id')}",
+            }
+        )
+
+    if not announcements:
+        return
+
+    # Send each announcement as an individual message so that
+    # every new activity shows up clearly in the chat.
+    for entry in announcements:
+        course_name = entry["course_name"]
+        title = entry["title"]
+
+        lines: list[str] = ["📢 *Course announcement*", ""]
+        lines.append(f"*{title}* — _{course_name}_")
+
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode="Markdown",
+        )
+
+
 async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /grades command."""
 
@@ -875,38 +1072,34 @@ async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /download command.
-
-    Extracts Canvas file API links (data-api-endpoint) from assignment
-    descriptions in the same calendar window used by /calendar and
-    sends them to the user.
-
-    This behavior is currently disabled to avoid bulk file downloads
-    when users invoke /download.
-    """
-
-    user = update.effective_user
-
-    logger.info(
-        "Received /download from user_id=%s username=%s",
-        getattr(user, "id", None),
-        getattr(user, "username", None),
-    )
-    # Intentionally do nothing; /download is disabled.
-    return
-
-
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /reminders command."""
+    """Handle /reminders command.
+
+    Currently used to opt in/out of planner announcement notifications.
+    """
 
     message = update.effective_message
     if not message:
         return
 
+    chat_id = await _get_chat_id_or_error(update)
+    if chat_id is None:
+        return
+
+    from services.user_store import get_planner_announcement_notifications
+
+    enabled = get_planner_announcement_notifications(chat_id)
+
+    text = (
+        "⏰ *Planner Notifications*\n\n"
+        "Would you like to receive Telegram notifications when there are "
+        "unread Canvas announcements with new activity?"
+    )
+
     await message.reply_text(
-        "⏰ Reminders are not implemented yet.",
-        reply_markup=main_menu_keyboard(),
+        text,
+        parse_mode="Markdown",
+        reply_markup=reminders_keyboard(enabled),
     )
 
 

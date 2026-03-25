@@ -4,7 +4,7 @@ import secrets
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from services.db import Base
@@ -85,4 +85,28 @@ class User(Base):
         return (
             f"User(id={self.id!r}, username={self.username!r}, "
             f"firstname={self.firstname!r}, lastname={self.lastname!r})"
+        )
+
+
+class UserSettings(Base):
+    """Per-user feature flags and notification preferences."""
+
+    __tablename__ = "user_settings"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+    )
+
+    planner_announcement_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default="0",
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return (
+            f"UserSettings(chat_id={self.chat_id!r}, "
+            f"planner_announcement_notifications_enabled="
+            f"{self.planner_announcement_notifications_enabled!r})"
         )

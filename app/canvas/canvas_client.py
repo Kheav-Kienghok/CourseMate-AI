@@ -111,6 +111,42 @@ def get_calendar_events(
     return the_events
 
 
+def get_planner_items(
+    canvas_token: str | None,
+    *,
+    start_date: str,
+    filter: str = "incomplete_items",
+    order: str = "asc",
+    per_page: int = 14,
+) -> list[dict[str, Any]]:
+    """Fetch planner items (e.g. incomplete assignments) for the user.
+
+    Thin wrapper around ``/v1/planner/items``. ``start_date`` should be an
+    ISO8601 string with UTC timezone (e.g. ``2026-03-25T00:00:00Z``).
+    """
+
+    base_url = get_canvas_base_url()
+
+    api_url = f"{base_url}/v1/planner/items"
+    headers = {"Authorization": f"Bearer {canvas_token}"}
+
+    params: dict[str, Any] = {
+        "start_date": start_date,
+        "filter": filter,
+        "order": order,
+        "per_page": per_page,
+    }
+
+    response = requests.get(api_url, headers=headers, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    if not isinstance(data, list):
+        raise TypeError("Expected list of planner items from Canvas API")
+
+    return data
+
+
 def download_canvas_file(
     canvas_token: str | None,
     file_api_endpoint: str,

@@ -25,6 +25,29 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def reminders_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    """Inline keyboard for toggling planner announcement notifications."""
+
+    status_label = "✅ Notifications ON" if enabled else "❌ Notifications OFF"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Yes, send announcements",
+                callback_data="reminders:announcements:yes",
+            ),
+            InlineKeyboardButton(
+                "No, don't send",
+                callback_data="reminders:announcements:no",
+            ),
+        ],
+        [InlineKeyboardButton(status_label, callback_data="reminders:ignore")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 def course_menu_keyboard(course_id: int) -> InlineKeyboardMarkup:
     """Return an inline keyboard for a specific course."""
 

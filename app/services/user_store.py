@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from services.db import SessionLocal
-from services.models import User
+from services.models import User, UserSettings
 from utils.crypto import decrypt_text, encrypt_text
 
 
@@ -94,3 +94,43 @@ def get_user_by_username(username: str) -> Optional[User]:
 
     with SessionLocal() as session:
         return session.query(User).filter_by(username=username).first()
+
+
+def set_planner_announcement_notifications(chat_id: int, enabled: bool) -> None:
+    """Enable or disable planner announcement notifications for a user."""
+
+    with SessionLocal() as session:
+        settings = session.query(UserSettings).filter_by(chat_id=chat_id).one_or_none()
+
+        if settings is None:
+            settings = UserSettings(
+                chat_id=chat_id,
+                planner_announcement_notifications_enabled=enabled,
+            )
+            session.add(settings)
+        else:
+            settings.planner_announcement_notifications_enabled = enabled
+
+        session.commit()
+
+
+def get_planner_announcement_notifications(chat_id: int) -> bool:
+    """Return True if planner announcement notifications are enabled."""
+
+    with SessionLocal() as session:
+        settings = session.query(UserSettings).filter_by(chat_id=chat_id).one_or_none()
+
+        return bool(settings and settings.planner_announcement_notifications_enabled)
+
+
+def get_chat_ids_with_planner_announcement_notifications_enabled() -> list[int]:
+    """Return chat IDs for all users with announcement notifications enabled."""
+
+    with SessionLocal() as session:
+        rows = (
+            session.query(UserSettings.chat_id)
+            .filter_by(planner_announcement_notifications_enabled=True)
+            .all()
+        )
+
+        return [chat_id for (chat_id,) in rows]

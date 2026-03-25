@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 """Runtime security hardening hooks.
 
 Currently used to mitigate a ReDoS issue in Pygments' AdlLexer
 without waiting on an upstream release.
 """
-
-from typing import Any
 
 
 def disable_vulnerable_pygments_lexers() -> None:
