@@ -5,12 +5,15 @@ import logging
 import os
 import re
 import time
+import calendar as _calendar
+from datetime import date, datetime, timedelta, timezone
 
 import anyio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import ContextTypes
 
 from bot.commands import (
+    _to_canvas_iso,
     calendar_command,
     grades_command,
     help_command,
@@ -375,9 +378,114 @@ async def handle_calendar_callback(
                 logger.warning("Malformed calendar nav callback data: %s", data)
                 return
 
-            # For prev we already encoded target year-month; same for next.
+            # Re-fetch assignments for the target month so that markers and
+            # clickable days remain accurate when navigating between months.
+            canvas_token = await _require_canvas_token(
+                query,
+                "view your calendar assignments",
+            )
+            if not canvas_token:
+                return
+
+            # Build context codes from the user's active dashboard courses.
+            try:
+                dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to load courses for calendar nav: %s", exc)
+                await query.edit_message_text(
+                    f"Failed to load courses for calendar: {exc}",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            context_codes: list[str] = []
+            for course in dashboard_cards:
+                if course.get("enrollmentState") != "active":
+                    continue
+                course_id = course.get("id")
+                if course_id is not None:
+                    context_codes.append(f"course_{course_id}")
+
+            # Compute a slightly wider window around the given month,
+            # mirroring the behaviour of /calendar.
+            first_of_month = datetime(year, month, 1, tzinfo=timezone.utc)
+            last_day = _calendar.monthrange(year, month)[1]
+            last_of_month = datetime(
+                year,
+                month,
+                last_day,
+                23,
+                59,
+                59,
+                tzinfo=timezone.utc,
+            )
+
+            start_dt = first_of_month - timedelta(days=7)
+            end_dt = last_of_month + timedelta(days=7)
+
+            try:
+                events = get_calendar_events(
+                    canvas_token=canvas_token,
+                    start_date=_to_canvas_iso(start_dt),
+                    end_date=_to_canvas_iso(end_dt),
+                    context_codes=context_codes,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to load calendar events for nav: %s", exc)
+                await query.edit_message_text(
+                    f"Failed to load calendar events: {exc}",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            assignments_by_date: dict[str, list[dict]] = {}
+            today_date = date.today()
+
+            for event in events:
+                raw_date = event.get("start_at")
+                if not raw_date:
+                    continue
+
+                if "T" in raw_date:
+                    date_str = raw_date.split("T", maxsplit=1)[0]
+                else:
+                    date_str = raw_date
+
+                try:
+                    event_date = datetime.fromisoformat(date_str).date()
+                except Exception:  # noqa: BLE001
+                    try:
+                        event_date = date.fromisoformat(date_str)
+                    except Exception:  # noqa: BLE001
+                        continue
+
+                has_submitted = bool(event.get("has_submitted"))
+
+                if event_date <= today_date:
+                    status = "past_submitted" if has_submitted else "past_unsubmitted"
+                else:
+                    status = "upcoming"
+
+                title = event.get("title") or "Assignment"
+                description = event.get("description") or "Description not available"
+                course_name = event.get("context_name") or "Unknown course"
+
+                assignments_by_date.setdefault(date_str, []).append(
+                    {
+                        "title": title,
+                        "description": description,
+                        "status": status,
+                        "has_submitted": has_submitted,
+                        "course_name": str(course_name),
+                    }
+                )
+
             await query.edit_message_reply_markup(
-                reply_markup=calendar_keyboard(year=year, month=month)
+                reply_markup=calendar_keyboard(
+                    year=year,
+                    month=month,
+                    assignments_by_date=assignments_by_date,
+                )
             )
             return
 

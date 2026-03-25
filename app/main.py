@@ -11,12 +11,16 @@ from ui.terminal import prompt_start_or_exit, startup_screen
 from utils.config import validate_required_env_vars
 from utils.generate_encryption_secret import generate_and_store_secret
 from utils.logging import setup_logging
+from utils.security_patches import disable_vulnerable_pygments_lexers
 
 
 def main() -> None:
     """Entry point for the application."""
 
     try:
+        # Apply runtime security hardening (e.g. Pygments ReDoS mitigation).
+        disable_vulnerable_pygments_lexers()
+
         # Configure logging before starting the bot so all modules
         # share the same logging setup.
         setup_logging()

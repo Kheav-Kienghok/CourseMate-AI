@@ -32,8 +32,8 @@ run: ## Run the application
 	$(UV) run python $(APP)
 
 .PHONY: dev
-dev: ## Run with auto-reload
-	$(UV) run watchfiles python $(APP)
+dev: ## Run with auto-reload (Python files only)
+	$(UV) run watchfiles --filter python "python $(APP)"
 
 # -----------------------------
 # Code Quality

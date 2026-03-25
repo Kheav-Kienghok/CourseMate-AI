@@ -16,7 +16,6 @@ It securely stores each user’s Canvas API token (encrypted at rest) and uses i
 * `/courses` – List dashboard courses
 * `/assignments` – View assignment overview (monthly / to-do style)
 * `/calendar` – Interactive monthly calendar with assignment drill-down
-* `/download` – Download assignment-related files (if available)
 * `/grades` – *(Coming soon)*
 * `/reminders` – *(Coming soon)*
 
