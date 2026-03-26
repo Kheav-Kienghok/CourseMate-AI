@@ -54,11 +54,19 @@ def _format_due_with_relative(value: str | None) -> str | None:
     if dt is None:
         return value
 
-    pretty = dt.strftime("%B %-d, %Y %I:%M %p")
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Asia/Phnom_Penh")
+    except ImportError:
+        # Python <3.9 fallback (not expected in this project)
+        tz = timezone.utc
 
-    today_utc = datetime.now(timezone.utc).date()
-    due_date = dt.astimezone(timezone.utc).date()
-    delta_days = (due_date - today_utc).days
+    dt_local = dt.astimezone(tz)
+    pretty = dt_local.strftime("%B %-d, %Y %I:%M %p")
+
+    today_local = datetime.now(tz).date()
+    due_date = dt_local.date()
+    delta_days = (due_date - today_local).days
 
     if delta_days == 0:
         suffix = "(today)"
