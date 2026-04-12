@@ -21,9 +21,11 @@ from bot.keyboards import (
 from canvas.canvas_client import (
     get_calendar_events,
     get_course_assignments,
+    get_course_grade,
     get_dashboard_cards,
     get_planner_items,
 )
+from canvas.grade_rule import GradeCalculator
 from services.user_store import get_user_canvas_token, set_user_canvas_token
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 # Number of assignments to show per page when listing course assignments.
 ASSIGNMENTS_PAGE_SIZE = 5
+
+
+_grade_calculator = GradeCalculator()
 
 
 def _month_window(now_utc: datetime) -> tuple[int, int, datetime, datetime]:
@@ -1066,10 +1071,275 @@ async def grades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message:
         return
 
-    await message.reply_text(
-        "📊 Grade summary is not implemented yet.",
-        reply_markup=main_menu_keyboard(),
+    user = update.effective_user
+    query = update.callback_query
+    data = query.data if query else None
+
+    if _is_duplicate_command(context, user, "grades"):
+        await message.reply_text(
+            "Still processing your previous /grades request, please wait…",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    logger.info(
+        "Received /grades from user_id=%s username=%s (callback=%s)",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+        bool(query),
     )
+
+    chat_id = await _get_chat_id_or_error(update)
+    if chat_id is None:
+        return
+
+    canvas_token = get_user_canvas_token(chat_id)
+    if not canvas_token:
+        text = (
+            "To view your grades, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*\n\n"
+            "You can create a token in Canvas under *Account → Settings → New Access Token*."
+        )
+
+        if query:
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            await message.reply_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard(),
+            )
+        return
+
+    # Detect whether this was triggered for a specific course via
+    # callback data like "course:{course_id}:grades".
+    selected_course_id: int | None = None
+    if (
+        isinstance(data, str)
+        and data.startswith("course:")
+        and data.endswith(":grades")
+    ):
+        parts = data.split(":", maxsplit=2)
+        if len(parts) == 3:
+            try:
+                selected_course_id = int(parts[1])
+            except ValueError:
+                selected_course_id = None
+
+    try:
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load courses for grades: %s", exc)
+        if query:
+            await query.edit_message_text(
+                f"Failed to load courses: {exc}",
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            await message.reply_text(
+                f"Failed to load courses: {exc}",
+                reply_markup=main_menu_keyboard(),
+            )
+        return
+
+    if not dashboard_cards:
+        text = "No courses found on your Canvas dashboard."
+        if query:
+            await query.edit_message_text(text, reply_markup=main_menu_keyboard())
+        else:
+            await message.reply_text(text, reply_markup=main_menu_keyboard())
+        return
+
+    # Filter to a single course when invoked from a course-specific
+    # callback; otherwise include all active courses.
+    courses_to_show: list[dict[str, Any]] = []
+
+    for course in dashboard_cards:
+        course_id = course.get("id")
+        if course_id is None:
+            continue
+
+        if selected_course_id is not None and int(course_id) != selected_course_id:
+            continue
+
+        # Only show active enrollments in the overall grades view to
+        # avoid clutter from concluded/archived courses.
+        if selected_course_id is None and course.get("enrollmentState") != "active":
+            continue
+
+        courses_to_show.append(course)
+
+    if not courses_to_show:
+        text = "No matching courses found to show grades for."
+        if query:
+            await query.edit_message_text(text, reply_markup=main_menu_keyboard())
+        else:
+            await message.reply_text(text, reply_markup=main_menu_keyboard())
+        return
+
+    lines: list[str] = []
+
+    # Derive a simple semester/term label from the first dashboard card.
+    raw_term = dashboard_cards[0].get("term") if dashboard_cards else None
+    if isinstance(raw_term, dict):
+        term_label = (
+            raw_term.get("name") or raw_term.get("sis_term_id") or "Current Term"
+        )
+    else:
+        term_label = str(raw_term) if raw_term else "Current Term"
+
+    if selected_course_id is not None:
+        lines.append("📊 *Course Grade* ")
+    else:
+        lines.append("📊 *Your Current Course Grades*")
+
+    lines.append(f"_Semester: {term_label}_")
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    overall_gpas: list[float] = []
+
+    for course in courses_to_show:
+        course_id_any = course.get("id")
+        if course_id_any is None:
+            continue
+
+        name = (
+            course.get("shortName") or course.get("originalName") or str(course_id_any)
+        )
+        code = course.get("courseCode") or ""
+        section = course.get("section") or ""
+        label = f"{name} ({code})".strip() if code else str(name)
+
+        icon = "📚"
+
+        try:
+            grade_info = get_course_grade(int(course_id_any), canvas_token=canvas_token)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Could not load grade for course_id=%s: %s", course_id_any, exc
+            )
+            lines.append(f"• *{label}* — grade not available")
+            continue
+
+        current_score = grade_info.get("current_score")
+        final_score = grade_info.get("final_score")
+        current_grade = grade_info.get("current_grade")
+        final_grade = grade_info.get("final_grade")
+
+        def _fmt_score(score) -> str:
+            if score is None:
+                return "N/A"
+            try:
+                return f"{float(score):.2f}%"
+            except Exception:  # noqa: BLE001
+                return str(score)
+
+        def _compute_letter_and_gpa(
+            score, letter_from_canvas: str | None
+        ) -> tuple[str | None, float | None]:
+            """Return (letter, gpa) for a numeric score.
+
+            Always uses the local grading_scale for GPA and prefers the
+            Canvas-provided letter when present.
+            """
+
+            mapped = None
+            if isinstance(score, (int, float)):
+                mapped = _grade_calculator.get_rule(float(score))
+
+            if mapped is not None:
+                letter = mapped.grade
+                gpa = mapped.gpa
+                if letter_from_canvas:
+                    letter = letter_from_canvas
+                if isinstance(letter, str) and isinstance(gpa, (int, float)):
+                    return letter, float(gpa)
+
+            if letter_from_canvas:
+                return letter_from_canvas, None
+
+            return None, None
+
+        if current_score is not None or current_grade:
+            score_str = _fmt_score(current_score)
+            letter, gpa = _compute_letter_and_gpa(current_score, current_grade)
+            if gpa is not None:
+                overall_gpas.append(gpa)
+            letter_display = letter or "N/A"
+            gpa_display = f"{gpa:.2f}" if gpa is not None else "N/A"
+            lines.append(f"{icon} *{label}*")
+            if section:
+                lines.append(f"📌 Section: `{section}`")
+            lines.append(
+                f"📈 Score: *{score_str}* → *{letter_display}*  (`GPA {gpa_display}`)"
+            )
+            lines.append("")
+        elif final_score is not None or final_grade:
+            score_str = _fmt_score(final_score)
+            letter, gpa = _compute_letter_and_gpa(final_score, final_grade)
+            if gpa is not None:
+                overall_gpas.append(gpa)
+            letter_display = letter or "N/A"
+            gpa_display = f"{gpa:.2f}" if gpa is not None else "N/A"
+            lines.append(f"{icon} *{label}*")
+            if section:
+                lines.append(f"📌 Section: `{section}`")
+            lines.append(
+                f"📈 Score: *{score_str}* → *{letter_display}*  (`GPA {gpa_display}`)"
+            )
+            lines.append("")
+        else:
+            lines.append(f"{icon} *{label}*")
+            if section:
+                lines.append(f"📌 Section: `{section}`")
+            lines.append("📈 Score: *N/A* → *N/A*  (`GPA N/A`)")
+            lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
+    # Compute a simple overall GPA across the shown courses using the
+    # per-course GPA values from the grading scale.
+    overall_gpa = sum(overall_gpas) / len(overall_gpas) if overall_gpas else None
+    if overall_gpa is not None:
+        overall_rule = _grade_calculator.get_rule_by_gpa(overall_gpa)
+        overall_letter = overall_rule.grade if overall_rule else "N/A"
+        lines.append(f"📊 *Overall GPA:* {overall_gpa:.2f} → *{overall_letter}*")
+        if overall_gpa < 3.0:
+            lines.append(
+                "⚠️ *Overall Status:* There's room to improve — keep studying hard, you can do this!"
+            )
+        elif overall_gpa < 4.0:
+            lines.append(
+                "✅ *Overall Status:* Looking strong — keep up the great work! 🔥"
+            )
+        else:
+            lines.append(
+                "🏆 *Overall Status:* You are absolutely overkilling this semester — amazing job! 💥"
+            )
+    else:
+        lines.append("ℹ️ *Overall Status:* Not enough grade data yet to compute GPA.")
+
+    text = "\n".join(lines)
+
+    if query:
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        await message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

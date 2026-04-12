@@ -67,6 +67,10 @@ def course_menu_keyboard(course_id: int) -> InlineKeyboardMarkup:
                 "📝 Upcoming Assignments",
                 callback_data=f"course:{course_id}:assignments:upcoming",
             ),
+            InlineKeyboardButton(
+                "📊 Grades",
+                callback_data=f"course:{course_id}:grades",
+            ),
         ],
         [InlineKeyboardButton("⬅️ Back to Courses", callback_data="courses")],
     ]

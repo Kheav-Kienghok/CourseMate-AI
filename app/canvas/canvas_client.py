@@ -5,7 +5,10 @@ from typing import Any
 
 import requests
 
-from canvas.queries import GET_STUDENT_ASSIGNMENT_QUERY
+from canvas.queries import (
+    GET_COURSE_ASSIGNMENT_DUES_QUERY,
+    GET_STUDENT_ASSIGNMENT_QUERY,
+)
 from utils.config import get_canvas_base_url
 
 
@@ -255,6 +258,55 @@ def get_student_assignment(
     return {"data": {"assignment": assignment, "submission": submission}}
 
 
+def _fetch_assignment_due_at_graphql(
+    assignment_id: int | str,
+    canvas_token: str | None,
+) -> str | None:
+    """Fetch an assignment's due date via Canvas GraphQL.
+
+    This uses GET_COURSE_ASSIGNMENT_DUES_QUERY to retrieve the authoritative
+    `dueAt` value for a given assignment. Failures are swallowed and
+    represented as ``None`` so callers can gracefully fall back to existing
+    REST-provided due dates.
+    """
+
+    base_url = get_canvas_base_url()
+
+    api_url = f"{base_url}/graphql"
+    headers = {
+        "Authorization": f"Bearer {canvas_token}",
+        "Content-Type": "application/json",
+    }
+
+    payload: dict[str, Any] = {
+        "operationName": "GetAssignmentDueAt",
+        "variables": {
+            "assignmentLid": str(assignment_id),
+        },
+        "query": GET_COURSE_ASSIGNMENT_DUES_QUERY,
+    }
+
+    try:
+        response = requests.post(api_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        raw = response.json()
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not isinstance(raw, dict):
+        return None
+
+    graph_data = raw.get("data")
+    if not isinstance(graph_data, dict):
+        return None
+
+    assignment = graph_data.get("assignment") or {}
+    if not isinstance(assignment, dict):
+        return None
+
+    return assignment.get("dueAt")
+
+
 def get_course_assignments(
     course_id: int,
     canvas_token: str | None,
@@ -301,6 +353,18 @@ def get_course_assignments(
                 }
             )
 
+    # For assignments that have a deadline (or are expected to), refresh
+    # their due date from the Canvas GraphQL API so we always use the most
+    # accurate `dueAt` value.
+    for assignment in filtered_assignments:
+        assignment_id = assignment.get("id")
+        if assignment_id is None:
+            continue
+
+        gql_due_at = _fetch_assignment_due_at_graphql(assignment_id, canvas_token)
+        if gql_due_at:
+            assignment["due_at"] = gql_due_at
+
     # Sort assignments by due date (earliest first). Assignments without a
     # due date are placed at the end.
     filtered_assignments.sort(
@@ -340,3 +404,64 @@ def get_assignment_submission(
         raise TypeError("Expected dict for assignment submission from Canvas API")
 
     return data
+
+
+def get_course_grade(
+    course_id: int,
+    canvas_token: str | None,
+) -> dict[str, Any]:
+    """Return the current grade for the authenticated user in a course.
+
+    This uses the Canvas enrollments endpoint and filters to the current
+    user ("self") with a StudentEnrollment. The response includes a
+    "grades" object that contains percentage-style scores.
+
+    The returned dict has a stable, simplified shape::
+
+        {
+            "course_id": int,
+            "current_score": float | None,  # percentage (0-100)
+            "final_score": float | None,    # percentage (0-100)
+            "current_grade": str | None,   # letter grade (e.g. "B+")
+            "final_grade": str | None,
+        }
+    """
+
+    base_url = get_canvas_base_url()
+
+    api_url = f"{base_url}/v1/courses/{course_id}/enrollments"
+    headers = {"Authorization": f"Bearer {canvas_token}"}
+    params: dict[str, Any] = {
+        "type[]": ["StudentEnrollment"],
+        "user_id": "self",
+    }
+
+    response = requests.get(api_url, headers=headers, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    if not isinstance(data, list):
+        raise TypeError("Expected list of enrollments from Canvas API")
+
+    enrollment: dict[str, Any] | None = None
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        # Canvas returns "type": "StudentEnrollment" for student records.
+        if item.get("type") == "StudentEnrollment":
+            if str(item.get("course_id")) == str(course_id):
+                enrollment = item
+                break
+
+    grades = (enrollment or {}).get("grades") or {}
+    if not isinstance(grades, dict):
+        grades = {}
+
+    return {
+        "course_id": course_id,
+        "current_score": grades.get("current_score"),
+        "final_score": grades.get("final_score"),
+        "current_grade": grades.get("current_grade"),
+        "final_grade": grades.get("final_grade"),
+    }

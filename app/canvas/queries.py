@@ -33,3 +33,11 @@ GET_STUDENT_ASSIGNMENT_QUERY = """query GetStudentAssignment($assignmentLid: ID!
   }
 }
 """
+
+GET_COURSE_ASSIGNMENT_DUES_QUERY = """query GetAssignmentDueAt($assignmentLid: ID!) {
+  assignment(id: $assignmentLid) {
+    _id
+    dueAt
+  }
+}
+"""
