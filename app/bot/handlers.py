@@ -14,6 +14,7 @@ from bot.commands import (
     courses_command,
     grades_command,
     help_command,
+    natural_language_message_handler,
     planner_command,
     reminders_command,
     render_course_assignments,
@@ -26,6 +27,7 @@ from bot.errors import error_handler
 __all__ = [
     "start_command",
     "help_command",
+    "natural_language_message_handler",
     "courses_command",
     "assignments_command",
     "calendar_command",
