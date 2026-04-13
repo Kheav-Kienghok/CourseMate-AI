@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar as _calendar
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
@@ -10,6 +11,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.datetime_utils import _format_due_with_relative
+from bot.intent_parser import ParsedIntent, parse_user_intent
 from bot.keyboards import (
     calendar_keyboard,
     course_assignments_keyboard,
@@ -170,6 +172,159 @@ async def _get_chat_id_or_error(update: Update) -> int | None:
         return None
 
     return chat_id
+
+
+def _active_courses(dashboard_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return active courses, or the original list if no active state exists."""
+
+    active = [c for c in dashboard_cards if c.get("enrollmentState") == "active"]
+    return active or dashboard_cards
+
+
+def _course_label(course: dict[str, Any]) -> str:
+    name = course.get("shortName") or course.get("originalName") or "Unknown course"
+    code = course.get("courseCode") or ""
+    if code:
+        return f"{name} ({code})"
+    return str(name)
+
+
+def _normalize_course_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _resolve_course_by_name(
+    query: str | None,
+    courses: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Resolve a parsed course name to the best matching dashboard course."""
+
+    if not query:
+        return None
+
+    normalized_query = _normalize_course_key(query)
+    if not normalized_query:
+        return None
+
+    exact: list[dict[str, Any]] = []
+    contains: list[dict[str, Any]] = []
+
+    for course in courses:
+        candidates: list[str] = []
+
+        short_name = course.get("shortName")
+        if isinstance(short_name, str):
+            candidates.append(short_name)
+
+        original_name = course.get("originalName")
+        if isinstance(original_name, str):
+            candidates.append(original_name)
+
+        course_code = course.get("courseCode")
+        if isinstance(course_code, str):
+            candidates.append(course_code)
+
+        for candidate in candidates:
+            normalized_candidate = _normalize_course_key(candidate)
+            if not normalized_candidate:
+                continue
+
+            if normalized_candidate == normalized_query:
+                exact.append(course)
+                break
+
+            if (
+                normalized_query in normalized_candidate
+                or normalized_candidate in normalized_query
+            ):
+                contains.append(course)
+                break
+
+    if exact:
+        return exact[0]
+    if contains:
+        return contains[0]
+    return None
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "y", "1"}:
+            return True
+        if lowered in {"false", "no", "n", "0"}:
+            return False
+
+    return None
+
+
+def _target_percent_from_letter(desired_letter: str) -> float | None:
+    for rule in _grade_calculator.rules:
+        if rule.grade.upper() == desired_letter.upper():
+            return float(rule.min_percent)
+    return None
+
+
+def _normalize_grade_components(raw_components: Any) -> list[dict[str, Any]]:
+    """Normalize component entries used by grade calculations."""
+
+    if not isinstance(raw_components, list):
+        return []
+
+    components: list[dict[str, Any]] = []
+
+    for idx, item in enumerate(raw_components):
+        if not isinstance(item, dict):
+            continue
+
+        name_raw = item.get("name")
+        if isinstance(name_raw, str):
+            name = name_raw.strip()
+        elif name_raw is None:
+            name = ""
+        else:
+            name = str(name_raw).strip()
+
+        if not name:
+            name = f"component_{idx + 1}"
+
+        score = _to_float(item.get("score"))
+        if score is not None and (score < 0.0 or score > 100.0):
+            score = None
+
+        weight_percent = _to_float(item.get("weight_percent"))
+        if weight_percent is not None and (weight_percent < 0.0 or weight_percent > 100.0):
+            weight_percent = None
+
+        is_target_component = _to_bool(item.get("is_target_component"))
+
+        components.append(
+            {
+                "name": name,
+                "score": score,
+                "weight_percent": weight_percent,
+                "is_target_component": is_target_component,
+            }
+        )
+
+    return components
 
 
 # -----------------------------------------------------------
@@ -624,6 +779,633 @@ async def render_month_assignments_overview(
             reply_markup=reply_markup,
             parse_mode="Markdown",
         )
+
+
+async def _reply_single_course_grade(
+    message,
+    *,
+    course: dict[str, Any],
+    canvas_token: str,
+) -> None:
+    """Reply with a concise grade summary for one specific course."""
+
+    course_id = course.get("id")
+    if course_id is None:
+        await message.reply_text(
+            "I could not determine the selected course id.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    try:
+        grade_info = get_course_grade(int(course_id), canvas_token=canvas_token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load grade for course %s: %s", course_id, exc)
+        await message.reply_text(
+            f"Failed to load grade for {_course_label(course)}: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    current_score = grade_info.get("current_score")
+    final_score = grade_info.get("final_score")
+    current_grade = grade_info.get("current_grade")
+    final_grade = grade_info.get("final_grade")
+
+    score_value = _to_float(current_score)
+    if score_value is None:
+        score_value = _to_float(final_score)
+
+    letter = current_grade or final_grade
+    gpa: float | None = None
+
+    if score_value is not None:
+        mapped = _grade_calculator.get_rule(float(score_value))
+        if mapped is not None:
+            gpa = float(mapped.gpa)
+            if not letter:
+                letter = mapped.grade
+
+    lines: list[str] = ["Course grade summary", ""]
+    lines.append(f"Course: {_course_label(course)}")
+
+    if score_value is not None:
+        lines.append(f"Score: {score_value:.2f}%")
+    else:
+        lines.append("Score: N/A")
+
+    lines.append(f"Letter: {letter or 'N/A'}")
+    lines.append(f"GPA: {gpa:.2f}" if gpa is not None else "GPA: N/A")
+
+    await message.reply_text("\n".join(lines), reply_markup=main_menu_keyboard())
+
+
+async def _handle_today_assignments_intent(
+    message,
+    *,
+    parsed: ParsedIntent,
+    canvas_token: str,
+    dashboard_cards: list[dict[str, Any]],
+    selected_course: dict[str, Any] | None,
+) -> None:
+    """Handle AI intent for day-based assignment lookup."""
+
+    target_date = parsed.date or date.today().isoformat()
+    try:
+        parsed_day = date.fromisoformat(target_date)
+        target_date = parsed_day.isoformat()
+    except ValueError:
+        target_date = date.today().isoformat()
+
+    courses_scope = [selected_course] if selected_course else _active_courses(
+        dashboard_cards
+    )
+
+    context_codes: list[str] = []
+    for course in courses_scope:
+        if not course:
+            continue
+        course_id = course.get("id")
+        if course_id is not None:
+            context_codes.append(f"course_{course_id}")
+
+    if not context_codes:
+        await message.reply_text(
+            "No active courses were found to search assignments.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    start_date = f"{target_date}T00:00:00.000Z"
+    end_date = f"{target_date}T23:59:59.000Z"
+
+    try:
+        events = get_calendar_events(
+            canvas_token=canvas_token,
+            start_date=start_date,
+            end_date=end_date,
+            context_codes=context_codes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load day assignments for AI intent: %s", exc)
+        await message.reply_text(
+            f"Failed to load assignments for {target_date}: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if not events:
+        scope_text = (
+            f" in {_course_label(selected_course)}" if selected_course else ""
+        )
+        await message.reply_text(
+            f"No assignments found for {target_date}{scope_text}.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    lines: list[str] = [f"Assignments on {target_date}"]
+    if selected_course:
+        lines.append(f"Course: {_course_label(selected_course)}")
+    lines.append("")
+
+    events_sorted = sorted(events, key=lambda event: str(event.get("start_at") or ""))
+
+    for event in events_sorted[:20]:
+        title = event.get("title") or "Assignment"
+        course_name = event.get("context_name") or "Unknown course"
+        due_text = _format_due_with_relative(event.get("start_at")) or (
+            event.get("start_at") or "Due date unavailable"
+        )
+        status = "submitted" if event.get("has_submitted") else "pending"
+
+        if selected_course:
+            lines.append(f"- {title} ({due_text}, {status})")
+        else:
+            lines.append(f"- {title} [{course_name}] ({due_text}, {status})")
+
+    await message.reply_text("\n".join(lines), reply_markup=main_menu_keyboard())
+
+
+async def _handle_grade_calculation_intent(
+    message,
+    *,
+    parsed: ParsedIntent,
+    canvas_token: str,
+    selected_course: dict[str, Any] | None,
+) -> None:
+    """Handle AI intent for target-grade calculations."""
+
+    inputs = parsed.grade_inputs or {}
+
+    calculation_type_raw = inputs.get("calculation_type")
+    calculation_type = (
+        calculation_type_raw.strip().lower()
+        if isinstance(calculation_type_raw, str)
+        else None
+    )
+    if calculation_type not in {"current_total", "required_score"}:
+        calculation_type = None
+
+    target_percent = _to_float(inputs.get("target_percent"))
+    desired_letter_raw = inputs.get("desired_letter")
+    desired_letter = (
+        desired_letter_raw.strip().upper()
+        if isinstance(desired_letter_raw, str)
+        else None
+    )
+
+    if target_percent is None and desired_letter:
+        target_percent = _target_percent_from_letter(desired_letter)
+
+    components = _normalize_grade_components(inputs.get("components"))
+
+    if components:
+        missing_weight = [
+            str(component["name"])
+            for component in components
+            if component.get("weight_percent") is None
+        ]
+        if missing_weight:
+            await message.reply_text(
+                "Each component must include a weight percentage. Missing weight for: "
+                + ", ".join(missing_weight),
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        total_weight = sum(float(component["weight_percent"]) for component in components)
+
+        if total_weight <= 0.0:
+            await message.reply_text(
+                "The sum of component weights must be greater than 0.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        if total_weight > 100.0:
+            await message.reply_text(
+                "The sum of component weights cannot be more than 100%.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        known_components = [c for c in components if c.get("score") is not None]
+        unknown_components = [c for c in components if c.get("score") is None]
+
+        known_weight = sum(float(component["weight_percent"]) for component in known_components)
+        known_contribution = sum(
+            float(component["score"]) * float(component["weight_percent"]) / 100.0
+            for component in known_components
+        )
+
+        current_total_so_far: float | None = None
+        if known_weight > 0.0:
+            current_total_so_far = known_contribution / (known_weight / 100.0)
+
+        wants_required_score = (
+            calculation_type == "required_score" or target_percent is not None
+        )
+
+        if wants_required_score:
+            if target_percent is None:
+                await message.reply_text(
+                    "I need your target grade first. Example: target A- or target 90%.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            if not unknown_components:
+                lines: list[str] = ["Grade target check", ""]
+                if selected_course is not None:
+                    lines.append(f"Course: {_course_label(selected_course)}")
+
+                lines.append(f"Target percent: {target_percent:.2f}%")
+                lines.append(
+                    f"Overall weighted grade from provided components: {known_contribution:.2f}%"
+                )
+
+                gap = target_percent - known_contribution
+                if gap <= 0:
+                    lines.append("Result: target is already reached.")
+                else:
+                    lines.append(
+                        f"Result: target is short by {gap:.2f} percentage points."
+                    )
+
+                await message.reply_text(
+                    "\n".join(lines),
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            target_candidates = [
+                c for c in unknown_components if c.get("is_target_component") is True
+            ]
+
+            if len(target_candidates) > 1:
+                await message.reply_text(
+                    "Only one target component can be unknown for required-score calculation.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            if len(unknown_components) > 1 and not target_candidates:
+                unknown_names = ", ".join(
+                    str(component["name"]) for component in unknown_components
+                )
+                await message.reply_text(
+                    "I can solve required score only when exactly one component score is unknown. "
+                    f"Please provide more scores. Unknown components: {unknown_names}",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            target_component = (
+                target_candidates[0] if target_candidates else unknown_components[0]
+            )
+
+            if len(unknown_components) > 1:
+                unresolved = [
+                    str(component["name"])
+                    for component in unknown_components
+                    if component is not target_component
+                ]
+                if unresolved:
+                    await message.reply_text(
+                        "I still need the score for: " + ", ".join(unresolved),
+                        reply_markup=main_menu_keyboard(),
+                    )
+                    return
+
+            unknown_weight = float(target_component["weight_percent"])
+            if unknown_weight <= 0.0:
+                await message.reply_text(
+                    "Target component weight must be greater than 0.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+
+            required_score = (
+                target_percent - known_contribution
+            ) / (unknown_weight / 100.0)
+
+            lines = ["Grade target calculation", ""]
+            if selected_course is not None:
+                lines.append(f"Course: {_course_label(selected_course)}")
+
+            lines.append(f"Target percent: {target_percent:.2f}%")
+            if desired_letter:
+                lines.append(f"Target letter: {desired_letter}")
+
+            lines.append(f"Known weighted contribution: {known_contribution:.2f}%")
+            lines.append(
+                f"Target component: {target_component['name']} ({unknown_weight:.2f}%)"
+            )
+            lines.append(f"Required score: {required_score:.2f}%")
+
+            if current_total_so_far is not None:
+                lines.append(
+                    f"Current total over scored components: {current_total_so_far:.2f}%"
+                )
+
+            if required_score > 100.0:
+                lines.append("Result: mathematically impossible with current numbers.")
+            elif required_score < 0.0:
+                lines.append("Result: target is already secured.")
+            elif required_score >= 90.0:
+                lines.append("Result: very challenging but still possible.")
+            else:
+                lines.append("Result: achievable with a focused prep plan.")
+
+            await message.reply_text(
+                "\n".join(lines),
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        if current_total_so_far is None:
+            await message.reply_text(
+                "I need at least one component score to calculate current total.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        lines = ["Current total grade calculation", ""]
+        if selected_course is not None:
+            lines.append(f"Course: {_course_label(selected_course)}")
+
+        lines.append(
+            f"Current total over scored components: {current_total_so_far:.2f}%"
+        )
+        lines.append(f"Scored weight: {known_weight:.2f}%")
+        lines.append(f"Provided total component weight: {total_weight:.2f}%")
+        lines.append(f"Weighted contribution so far: {known_contribution:.2f}%")
+
+        if unknown_components:
+            unknown_names = ", ".join(
+                str(component["name"]) for component in unknown_components
+            )
+            lines.append(f"Missing scores for: {unknown_names}")
+        elif abs(total_weight - 100.0) <= 1e-6:
+            lines.append(
+                f"Overall course total from provided components: {known_contribution:.2f}%"
+            )
+        else:
+            lines.append(
+                "All provided components are scored, but they account for less than 100% of the course."
+            )
+
+        await message.reply_text(
+            "\n".join(lines),
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    current_percent = _to_float(inputs.get("current_percent"))
+    final_weight_percent = _to_float(inputs.get("final_weight_percent"))
+    current_weight_percent = _to_float(inputs.get("current_weight_percent"))
+
+    if current_percent is None and selected_course is not None:
+        selected_course_id = selected_course.get("id")
+        if selected_course_id is not None:
+            try:
+                grade_info = get_course_grade(
+                    int(selected_course_id),
+                    canvas_token=canvas_token,
+                )
+                current_percent = _to_float(grade_info.get("current_score"))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Could not auto-fill current score from course %s: %s",
+                    selected_course_id,
+                    exc,
+                )
+
+    if target_percent is None:
+        await message.reply_text(
+            "I need your target grade first. Example: target A- or target 90%.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if current_percent is None:
+        await message.reply_text(
+            "I need your current percentage. Example: current 78.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if final_weight_percent is None:
+        await message.reply_text(
+            "I need the final exam weight percentage. Example: final weight 40.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if final_weight_percent <= 0 or final_weight_percent > 100:
+        await message.reply_text(
+            "Final exam weight must be between 0 and 100.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if current_weight_percent is None:
+        current_weight_percent = 100.0 - final_weight_percent
+
+    if current_weight_percent < 0 or current_weight_percent > 100:
+        await message.reply_text(
+            "Current weight must be between 0 and 100.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    required_final = (
+        target_percent - current_percent * (current_weight_percent / 100.0)
+    ) / (final_weight_percent / 100.0)
+
+    lines: list[str] = ["Grade target calculation", ""]
+    if selected_course is not None:
+        lines.append(f"Course: {_course_label(selected_course)}")
+
+    lines.append(f"Current score: {current_percent:.2f}%")
+    lines.append(f"Current weight: {current_weight_percent:.2f}%")
+    lines.append(f"Final weight: {final_weight_percent:.2f}%")
+
+    if desired_letter:
+        lines.append(f"Target letter: {desired_letter}")
+    lines.append(f"Target percent: {target_percent:.2f}%")
+    lines.append("")
+    lines.append(f"Required final score: {required_final:.2f}%")
+
+    if required_final > 100:
+        lines.append("Result: mathematically impossible with current numbers.")
+    elif required_final < 0:
+        lines.append("Result: target is already secured.")
+    elif required_final >= 90:
+        lines.append("Result: very challenging but still possible.")
+    else:
+        lines.append("Result: achievable with a focused final prep plan.")
+
+    await message.reply_text("\n".join(lines), reply_markup=main_menu_keyboard())
+
+
+async def natural_language_message_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle free-text messages via AI intent parsing and backend routing."""
+
+    message = update.effective_message
+    if not message:
+        return
+
+    user = update.effective_user
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    if _is_duplicate_command(context, user, "ai_text", window_seconds=2.5):
+        await message.reply_text(
+            "Still processing your previous message, please wait…",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    chat_id = await _get_chat_id_or_error(update)
+    if chat_id is None:
+        return
+
+    canvas_token = get_user_canvas_token(chat_id)
+    if not canvas_token:
+        await message.reply_text(
+            "To use AI message parsing, please set your personal Canvas API token first.\n\n"
+            "Send it using:\n"
+            "*/settoken YOUR_CANVAS_TOKEN*",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    try:
+        dashboard_cards = get_dashboard_cards(canvas_token=canvas_token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to load courses before AI parsing: %s", exc)
+        await message.reply_text(
+            f"Failed to load your courses: {exc}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    active_courses = _active_courses(dashboard_cards)
+    available_course_names = [_course_label(course) for course in active_courses]
+
+    parsed = parse_user_intent(
+        text,
+        today=date.today(),
+        available_courses=available_course_names,
+    )
+
+    logger.info(
+        "AI parse result | intent=%s course=%s date=%s confidence=%.2f error=%s",
+        parsed.intent,
+        parsed.course,
+        parsed.date,
+        parsed.confidence,
+        parsed.error,
+    )
+
+    if parsed.intent == "unknown" and parsed.error:
+        if "GEMINI_API_KEY" in parsed.error:
+            await message.reply_text(
+                "AI parsing is not configured yet. Please set GEMINI_API_KEY in your environment.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+    selected_course = _resolve_course_by_name(parsed.course, active_courses)
+
+    if parsed.course and selected_course is None and parsed.intent in {
+        "course_assignments",
+        "grades",
+        "grade_calculation",
+    }:
+        await message.reply_text(
+            f"I could not find a matching course for '{parsed.course}'. "
+            "Try using the course code or the exact course name.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if parsed.intent == "today_assignments":
+        await _handle_today_assignments_intent(
+            message,
+            parsed=parsed,
+            canvas_token=canvas_token,
+            dashboard_cards=dashboard_cards,
+            selected_course=selected_course,
+        )
+        return
+
+    if parsed.intent == "course_assignments":
+        if selected_course is None:
+            await message.reply_text(
+                "Please include a course name. Example: assignments for Database Systems.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        selected_course_id = selected_course.get("id")
+        if selected_course_id is None:
+            await message.reply_text(
+                "I could not determine the selected course id.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+        await render_course_assignments(
+            message,
+            int(selected_course_id),
+            canvas_token,
+            page=1,
+            edit=False,
+            status=None,
+        )
+        return
+
+    if parsed.intent == "grades":
+        if selected_course is not None:
+            await _reply_single_course_grade(
+                message,
+                course=selected_course,
+                canvas_token=canvas_token,
+            )
+        else:
+            await grades_command(update, context)
+        return
+
+    if parsed.intent == "overall_performance":
+        await grades_command(update, context)
+        return
+
+    if parsed.intent == "grade_calculation":
+        await _handle_grade_calculation_intent(
+            message,
+            parsed=parsed,
+            canvas_token=canvas_token,
+            selected_course=selected_course,
+        )
+        return
+
+    await message.reply_text(
+        "I could not confidently understand that request.\n\n"
+        "Try examples:\n"
+        "- assignments due today\n"
+        "- assignments for Data Structures\n"
+        "- show my grades\n"
+        "- what do I need on the final to get A- (current 78, final 40%)",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 # -----------------------------------------------------------

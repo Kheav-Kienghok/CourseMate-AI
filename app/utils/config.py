@@ -60,6 +60,21 @@ def get_telegram_bot_token() -> str:
     return token
 
 
+def get_gemini_api_key() -> str | None:
+    """Return Gemini API key from env (GEMINI_API_KEY), if configured."""
+
+    return os.getenv("GEMINI_API_KEY")
+
+
+def get_gemini_model() -> str:
+    """Return Gemini model name for intent parsing.
+
+    Defaults to a Flash model for low latency and cost.
+    """
+
+    return os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+
 def get_telegram_allowed_chat_id() -> int | None:
     """Return the single allowed Telegram chat ID (TELEGRAM_ALLOWED_CHAT_ID).
 

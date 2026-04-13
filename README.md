@@ -10,21 +10,33 @@ It securely stores each user’s Canvas API token (encrypted at rest) and uses i
 
 ### Telegram Commands
 
-* `/start` – Display welcome message and main menu
-* `/help` – List all available commands
-* `/settoken <CANVAS_TOKEN>` – Store Canvas API token (encrypted)
-* `/courses` – List dashboard courses
-* `/assignments` – View assignment overview (monthly / to-do style)
-* `/calendar` – Interactive monthly calendar with assignment drill-down
-* `/grades` – *(Coming soon)*
-* `/reminders` – *(Coming soon)*
+- `/start` – Display welcome message and main menu
+- `/help` – List all available commands
+- `/settoken <CANVAS_TOKEN>` – Store Canvas API token (encrypted)
+- `/courses` – List dashboard courses
+- `/assignments` – View assignment overview (monthly / to-do style)
+- `/calendar` – Interactive monthly calendar with assignment drill-down
+- `/grades` – Show current grades and overall GPA
+- `/reminders` – Configure planner announcement notifications
+
+### AI Intent Parsing (Gemini Flash)
+
+You can also send free-text messages (no slash command), for example:
+
+- "what assignments are due today"
+- "show assignments for database systems"
+- "show my overall performance"
+- "what do I need on the final to get A- if I have 78 and final is 40%"
+
+The bot uses Gemini Flash to parse text into structured JSON and then routes the
+result to Canvas backend fetch functions.
 
 ### Inline Navigation
 
-* Menu-driven navigation via inline keyboards
-* Pagination for assignments
-* Course browsing
-* Interactive calendar date selection
+- Menu-driven navigation via inline keyboards
+- Pagination for assignments
+- Course browsing
+- Interactive calendar date selection
 
 ---
 
@@ -57,6 +69,8 @@ HTTP_URL=https://<school>.instructure.com/api
 COURSEMATE_ENCRYPTION_SECRET=your_secret_key
 DATABASE_URL=sqlite:///coursemate.sqlite3   # optional
 ENVIRONMENT=Development                     # optional
+GEMINI_API_KEY=your_gemini_api_key          # required for AI free-text parsing
+GEMINI_MODEL=gemini-2.0-flash               # optional
 ```
 
 ⚠️ **Important:**
@@ -111,14 +125,14 @@ python -m app.main
 
 ## 🔐 Security & Privacy
 
-* Canvas tokens are encrypted using **Fernet encryption**
-* Secrets are derived from `COURSEMATE_ENCRYPTION_SECRET`
-* Do **not** commit `.env` or expose tokens
+- Canvas tokens are encrypted using **Fernet encryption**
+- Secrets are derived from `COURSEMATE_ENCRYPTION_SECRET`
+- Do **not** commit `.env` or expose tokens
 
 ### Optional Access Control
 
-* `TELEGRAM_ALLOWED_CHAT_ID`
-* `TELEGRAM_ALLOWED_USERNAME`
+- `TELEGRAM_ALLOWED_CHAT_ID`
+- `TELEGRAM_ALLOWED_USERNAME`
 
 If unset, the bot is publicly accessible.
 
@@ -126,15 +140,15 @@ If unset, the bot is publicly accessible.
 
 ## 🧑‍💻 Developer Notes
 
-* Main bot class: `app/bot/telegram_bot.py`
-* Callback handler: `app/bot/callbacks.py::main_menu_callback`
-* Canvas client: `app/canvas/canvas_client.py`
+- Main bot class: `app/bot/telegram_bot.py`
+- Callback handler: `app/bot/callbacks.py::main_menu_callback`
+- Canvas client: `app/canvas/canvas_client.py`
 
 Detailed documentation:
 
-* `docs/telegram-bot-api.md`
-* `docs/canvas-client-api.md`
-* `docs/telegram-canvas-architecture.md`
+- `docs/telegram-bot-api.md`
+- `docs/canvas-client-api.md`
+- `docs/telegram-canvas-architecture.md`
 
 ---
 

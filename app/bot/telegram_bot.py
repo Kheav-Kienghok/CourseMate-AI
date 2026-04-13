@@ -12,6 +12,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from bot.handlers import (
@@ -22,6 +24,7 @@ from bot.handlers import (
     grades_command,
     help_command,
     main_menu_callback,
+    natural_language_message_handler,
     planner_command,
     reminders_command,
     set_canvas_token_command,
@@ -59,6 +62,12 @@ class CourseMateBot:
         self._application.add_handler(CallbackQueryHandler(main_menu_callback))
         self._application.add_error_handler(error_handler)
         self._application.add_handler(CommandHandler("planner", planner_command))
+        self._application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                natural_language_message_handler,
+            )
+        )
 
         # Schedule periodic planner announcement checks for subscribed users
         self._schedule_announcements()
